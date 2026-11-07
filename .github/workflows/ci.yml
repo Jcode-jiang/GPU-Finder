@@ -41,7 +41,7 @@ jobs:
 
   macos-build:
     name: Build menu bar app
-    runs-on: macos-14
+    runs-on: macos-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
