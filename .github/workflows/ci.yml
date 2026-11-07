@@ -15,7 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # ubuntu-latest 已迁移到 26.04，setup-python 没有 3.9 的 x64 包；
+        # 固定 22.04，保证 Python 3.9 仍可安装。
+        os: [ubuntu-22.04, macos-latest]
         python: ["3.9", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
