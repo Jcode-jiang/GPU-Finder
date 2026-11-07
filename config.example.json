@@ -1,0 +1,21 @@
+{
+  "port": 8765,
+  "refresh_interval": 300,
+  "request_timeout": 20,
+  "credentials": {
+    "autodl_token": "",
+    "gpushare_token": "",
+    "compshare_public_key": "",
+    "compshare_private_key": "",
+    "matpool_token": "",
+    "matpool_user_id": ""
+  },
+  "rent": {
+    "enabled": false,
+    "image_id": "",
+    "disk_gb": 100,
+    "auto_stop_minutes": 60,
+    "max_hourly_price": 5,
+    "name_prefix": "gpufinder"
+  }
+}

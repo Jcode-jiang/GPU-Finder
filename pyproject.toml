@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpufinder"
+version = "1.0.0"
+description = "RTX 4090 / 5090 算力行情：AutoDL、矩池云、优云智算、恒源云 库存与价格"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "GPU Finder" }]
+keywords = ["gpu", "autodl", "matpool", "compshare", "gpushare", "macos"]
+dependencies = []
+
+[project.scripts]
+gpufinder = "gpufinder.cli:main"
+
+[tool.setuptools]
+packages = ["gpufinder", "gpufinder.providers"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+gpufinder = ["web/*"]
