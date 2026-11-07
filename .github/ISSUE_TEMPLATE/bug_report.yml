@@ -1,0 +1,63 @@
+name: Bug report
+description: 报告行情、Dashboard 或租卡问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认：**不要粘贴 token、Cookie、私钥、SSH 密码或账号截图**。
+        配置信息请用 `<redacted>` 代替。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 哪个平台、哪个页面、什么操作
+      placeholder: 例如：AutoDL 行情显示有货，但点租后提示主机已租满
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 Dashboard
+        2. 筛选 4090
+        3. 点击租
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 入口
+      options:
+        - Dashboard
+        - 状态栏 App
+        - CLI
+        - 安装 / 构建
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      placeholder: v2.0.0 或 git commit
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏后的日志
+      description: 删除 token、Cookie、IP、实例 ID 后再粘贴
+      render: shell
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 确认
+      options:
+        - label: 我已移除所有凭据与个人信息
+          required: true

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+*.app/Contents/_CodeSignature
+*.dSYM/
+
+# 本地运行/调试
+.devhome/
+.swift-cache/
+.chrome-*/
+.devhome
+*.log
+
+# 数据快照
+*.jsonl
+
+# 本地配置与凭据
+config.json
+.env
+*.pem
+*.key
+*.p12
+
+# 构建产物
+*.zip

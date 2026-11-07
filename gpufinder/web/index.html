@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPU Finder X · 多平台算力行情</title>
+<meta name="description" content="AutoDL、矩池云、优云智算、恒源云的 GPU 库存与价格实时比价，覆盖 40 系/50 系/A100/H100 等常用显卡" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div class="backdrop" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none">
+        <rect x="5" y="5" width="14" height="14" rx="3.2" stroke="currentColor" stroke-width="1.6"/>
+        <rect x="9" y="9" width="6" height="6" rx="1.4" fill="currentColor" opacity=".85"/>
+        <path d="M2.5 9.5h2M2.5 14.5h2M19.5 9.5h2M19.5 14.5h2M9.5 2.5v2M14.5 2.5v2M9.5 19.5v2M14.5 19.5v2"
+              stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="brand-text">
+      <h1>GPU Finder X</h1>
+      <p>多平台 GPU 算力行情 · 4090/5090/A100/H100…</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <div class="updated" id="updated" title="数据更新时间">
+      <span class="dot loading"></span><span id="updated-text">正在加载…</span>
+    </div>
+    <button class="btn primary" id="refresh" title="刷新（R）">
+      <svg class="icon-refresh" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4.5V11h-6.5" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>刷新</span>
+    </button>
+    <button class="btn ghost icon-btn" id="theme" title="切换深色 / 浅色" aria-label="切换主题">
+      <svg viewBox="0 0 24 24" fill="none" class="icon-theme">
+        <path d="M12 3.5v2M12 18.5v2M20.5 12h-2M5.5 12h-2M18 6l-1.4 1.4M7.4 16.6 6 18M18 18l-1.4-1.4M7.4 7.4 6 6"
+              stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="1.7"/>
+      </svg>
+    </button>
+    <button class="btn ghost icon-btn" id="settings" title="设置" aria-label="设置">
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M19.4 13.1c.06-.36.1-.73.1-1.1 0-.37-.04-.74-.1-1.1l1.7-1.32-1.8-3.12-2 .82c-.57-.44-1.2-.8-1.9-1.04L15 4h-6l-.4 2.24c-.7.24-1.33.6-1.9 1.04l-2-.82-1.8 3.12 1.7 1.32c-.06.36-.1.73-.1 1.1 0 .37.04.74.1 1.1l-1.7 1.32 1.8 3.12 2-.82c.57.44 1.2.8 1.9 1.04L9 20h6l.4-2.24c.7-.24 1.33-.6 1.9-1.04l2 .82 1.8-3.12-1.7-1.32Z"
+              stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero" id="hero" aria-label="行情概览">
+    <div class="hero-card skeleton-card" data-skeleton="rtx4090"></div>
+    <div class="hero-card skeleton-card" data-skeleton="rtx5090"></div>
+    <div class="hero-card skeleton-card" data-skeleton="all"></div>
+  </section>
+
+  <section class="preset-row" id="preset-chips" aria-label="常用配置预设"></section>
+
+  <section class="toolbar">
+    <div class="select-wrap family-select-wrap">
+      <select id="family-select" aria-label="显卡型号">
+        <option value="all">全部显卡</option>
+      </select>
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <div class="toolbar-right">
+      <label class="switch" title="只显示当前有货的资源">
+        <input type="checkbox" id="only-available" />
+        <span class="track"><span class="thumb"></span></span>
+        <span>只看有货</span>
+      </label>
+      <div class="select-wrap">
+        <select id="sort" aria-label="排序">
+          <option value="price">有货优先 · 价格从低到高</option>
+          <option value="stock">库存从多到少</option>
+          <option value="platform">按平台</option>
+        </select>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m7 10 5 5 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+  </section>
+
+  <section class="chips" id="platform-chips" aria-label="平台筛选"></section>
+
+  <section class="instances" id="instances" hidden></section>
+
+  <section class="offers" id="offers" aria-live="polite"></section>
+
+  <section class="providers" id="providers" aria-label="平台状态"></section>
+
+  <footer class="footer">
+    <p>
+      行情来自各平台官方 API / 公开页面，美元报价按 $ 显示，不做汇率换算。
+      价格与库存随时变动，请以下单页为准。
+    </p>
+    <p class="fineprint">GPU Finder X · 本地运行，不上传任何数据 · <span id="version">v2.0.0</span></p>
+  </footer>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <h2 id="drawer-title">设置</h2>
+      <button class="btn ghost icon-btn" id="drawer-close" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body">
+      <div class="field">
+        <label for="token-autodl">AutoDL Token <span class="hint">localStorage.token</span></label>
+        <input type="password" id="token-autodl" placeholder="未配置" autocomplete="off" spellcheck="false" />
+        <p class="field-help">登录 autodl.com 后，在开发者工具 → Application → Local Storage 复制 <code>token</code>。</p>
+      </div>
+      <div class="field">
+        <label for="token-gpushare">恒源云 Token <span class="hint">Cookie: gpu_share_token</span></label>
+        <input type="password" id="token-gpushare" placeholder="未配置" autocomplete="off" spellcheck="false" />
+        <p class="field-help">登录 gpushare.com 后，开发者工具 → Application → Cookies → https://www.gpushare.com → 复制 <code>gpu_share_token</code>。</p>
+      </div>
+      <div class="field">
+        <label for="token-matpool">矩池云 Token <span class="hint">Authorization: Bearer JWT</span></label>
+        <input type="password" id="token-matpool" placeholder="未配置" autocomplete="off" spellcheck="false" />
+        <p class="field-help">登录 matpool.com 后，开发者工具 → Network → 任意请求 → Request Headers 的 <code>authorization</code>，复制 <code>Bearer </code> 后面的 JWT。</p>
+      </div>
+      <div class="field">
+        <label for="matpool-user-id">矩池云用户 ID <span class="hint">X-Matpool-User-Id</span></label>
+        <input type="text" id="matpool-user-id" placeholder="未配置" autocomplete="off" spellcheck="false" />
+        <p class="field-help">同一个请求头里的 <code>x-matpool-user-id</code>，例如 123456。</p>
+      </div>
+      <div class="field">
+        <label for="compshare-public">优云智算 AccessKey ID <span class="hint">官方 API</span></label>
+        <input type="text" id="compshare-public" placeholder="未配置" autocomplete="off" spellcheck="false" />
+        <p class="field-help">控制台 → 账户中心 → API 密钥：console.compshare.cn/uaccount/api_manage。用于读取实时在售状态与价格。</p>
+      </div>
+      <div class="field">
+        <label for="compshare-secret">优云智算 AccessKey Secret <span class="hint">只保存在本机</span></label>
+        <input type="password" id="compshare-secret" placeholder="未配置" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="settings-sep"><span>首页概览</span><span class="hint">最多 3 张卡</span></div>
+      <div class="field-row">
+        <div class="field">
+          <label for="overview-1">卡片 1</label>
+          <select id="overview-1"></select>
+        </div>
+        <div class="field">
+          <label for="overview-2">卡片 2</label>
+          <select id="overview-2"></select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="overview-3">卡片 3</label>
+        <select id="overview-3"></select>
+      </div>
+      <p class="field-help">选择任意显卡家族；留空时按当前有货数量自动挑。Dashboard 用 3 张，状态栏面板用前 2 张。</p>
+
+      <div class="settings-sep"><span>一键租卡</span><span class="hint">所有平台</span></div>
+      <label class="switch rent-switch">
+        <input type="checkbox" id="rent-enabled" />
+        <span class="track"><span class="thumb"></span></span>
+        <span>启用一键租卡（会真实扣费）</span>
+      </label>
+      <div class="field">
+        <label for="rent-maxprice">价格上限（元/小时，所有平台）</label>
+        <input type="number" id="rent-maxprice" min="0.5" step="0.5" value="5" />
+      </div>
+      <div class="field">
+        <label for="rent-autostop">自动关机（分钟，优云智算 / AutoDL）</label>
+        <input type="number" id="rent-autostop" min="0" step="10" value="60" />
+      </div>
+      <div class="rent-balances" id="rent-balances" aria-label="各平台账户余额">
+        <div class="rent-balance-row"><span>优云智算</span><b>读取中…</b></div>
+      </div>
+
+      <div class="settings-sep"><span>优云智算</span><span class="hint">官方 API</span></div>
+      <div class="field">
+        <label for="rent-image">默认镜像 <span class="hint">仅显示可用</span></label>
+        <select id="rent-image"></select>
+      </div>
+      <div class="field">
+        <label for="rent-disk">系统盘 GB</label>
+        <input type="number" id="rent-disk" min="100" step="10" value="100" />
+      </div>
+
+      <div class="settings-sep"><span>AutoDL</span><span class="hint">按机器 CUDA 兼容</span></div>
+      <div class="field">
+        <label for="rent-autodl-image">镜像 <span class="hint">可选</span></label>
+        <select id="rent-autodl-image"></select>
+        <p class="field-help">留空按目标机器最高 CUDA 自动选择；手动选择会优先使用该镜像。自动关机使用上面的通用设置。</p>
+      </div>
+
+      <div class="settings-sep"><span>恒源云</span><span class="hint">按机器 CUDA 兼容</span></div>
+      <div class="field">
+        <label for="gpushare-image">镜像 <span class="hint">可选</span></label>
+        <select id="gpushare-image"></select>
+        <p class="field-help">留空按机器最高 CUDA 自动选择；手动选择会先校验 CUDA 兼容性。</p>
+      </div>
+      <div class="field">
+        <label for="gpushare-autostop">自动关机（分钟，0 = 关闭）</label>
+        <input type="number" id="gpushare-autostop" min="0" step="10" value="60" />
+      </div>
+
+      <div class="settings-sep"><span>矩池云</span><span class="hint">镜像按资源池</span></div>
+      <div class="field">
+        <label for="matpool-image-policy">镜像偏好</label>
+        <select id="matpool-image-policy">
+          <option value="auto">自动（PyTorch，CUDA ≤ 12.8）</option>
+          <option value="latest">最新 PyTorch / CUDA（可能不兼容旧驱动）</option>
+        </select>
+        <p class="field-help">镜像 ID 随资源池变化，不能设全局镜像；系统盘由资源池决定，暂不支持定时关机。</p>
+      </div>
+
+      <p class="field-help">恒源云 / 矩池云的系统盘由平台决定；勾选确认后才会真实创建。</p>
+      <div class="rent-support" aria-label="各平台租卡支持范围">
+        <div><b>优云智算</b><span>镜像 / 磁盘 / 自动关机</span></div>
+        <div><b>AutoDL</b><span>镜像可选 / 自动关机</span></div>
+        <div><b>恒源云</b><span>镜像可选 / 自动关机</span></div>
+        <div><b>矩池云</b><span>镜像偏好 / 手动释放</span></div>
+      </div>
+
+      <div class="field">
+        <label for="refresh-interval">自动刷新间隔</label>
+        <select id="refresh-interval">
+          <option value="0">关闭</option>
+          <option value="300">5 分钟</option>
+          <option value="900">15 分钟</option>
+          <option value="1800">30 分钟</option>
+        </select>
+      </div>
+    </div>
+    <div class="drawer-foot">
+      <span class="save-hint" id="save-hint"></span>
+      <button class="btn primary" id="save-settings">保存</button>
+    </div>
+  </div>
+</aside>
+
+<div class="modal" id="rent-modal" aria-hidden="true">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rent-title">
+    <div class="modal-head">
+      <h2 id="rent-title">确认租用</h2>
+      <button class="btn ghost icon-btn" id="rent-close" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div id="rent-summary" class="rent-summary"></div>
+      <div id="rent-ssh" class="ssh-box" hidden></div>
+      <p class="rent-error" id="rent-error" hidden></p>
+      <label class="confirm-check" id="rent-confirm-wrap">
+        <input type="checkbox" id="rent-confirm" />
+        <span>我确认创建按量计费实例，费用由我的优云智算账户承担</span>
+      </label>
+      <p class="field-help">默认会自动关机；你也可以在实例创建后立即释放。价格以下单为准。</p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="rent-cancel">取消</button>
+      <button class="btn primary" id="rent-go" disabled>确认租用</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

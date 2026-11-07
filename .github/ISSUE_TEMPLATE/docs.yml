@@ -1,0 +1,23 @@
+name: Configuration
+description: 报告文档、配置或构建问题
+title: "[Docs] "
+labels: ["documentation"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: 相关文件
+      placeholder: docs/RENT.md
+  - type: textarea
+    id: issue
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 确认
+      options:
+        - label: 我没有粘贴真实 token / Cookie / 私钥
+          required: true
