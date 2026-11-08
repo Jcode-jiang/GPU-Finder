@@ -288,7 +288,7 @@
     text.textContent = label;
     $("#updated").title = `${snap.generated_at || ""} · ${snap.summary?.offers ?? 0} 条报价`;
     const version = $("#version");
-    if (version) version.textContent = "v2.0.0";
+    if (version) version.textContent = "v1.0.0";
   }
 
   function overviewCards(all) {

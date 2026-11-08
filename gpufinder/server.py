@@ -31,7 +31,7 @@ from .presets import list_presets
 from .gpu import catalog_groups
 from .service import GPUService
 
-VERSION = "2.1.0"
+VERSION = "1.0.0"
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 
 _MIME = {

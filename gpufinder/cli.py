@@ -14,7 +14,7 @@ from typing import Any
 from .config import Config, config_path, CREDENTIAL_KEYS
 from .service import GPUService, filter_offers
 
-VERSION = "2.1.0"
+VERSION = "1.0.0"
 
 # ---------------------------------------------------------------------- 终端样式
 class Style:

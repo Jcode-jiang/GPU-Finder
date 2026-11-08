@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-**可以发布 2.1.0 beta / prerelease；不建议直接标成 stable。**
+**可以发布 1.0.0 beta / prerelease；不建议直接标成 stable。**
 
 已具备：
 
