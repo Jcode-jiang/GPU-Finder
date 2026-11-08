@@ -19,6 +19,11 @@ jobs:
         # 固定 22.04，保证 Python 3.9 仍可安装。
         os: [ubuntu-22.04, macos-latest]
         python: ["3.9", "3.11", "3.13"]
+        exclude:
+          # setup-python 3.9 x64 包在 Ubuntu runner 上偶发 504；
+          # 3.9 兼容性由 macos-latest job 覆盖，Ubuntu 保留 3.11/3.13。
+          - os: ubuntu-22.04
+            python: "3.9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
