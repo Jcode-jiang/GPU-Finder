@@ -94,6 +94,9 @@ def parse_host_market(html: str) -> dict[str, Any]:
 
 
 def _region_name(domain: int, domain_map: dict[int, str]) -> str:
+    # 实时 market 接口把默认/1区标成 domain 0，而页面展示为「1区」。
+    if domain == 0:
+        return "1区"
     name = domain_map.get(domain)
     if name:
         return _repair_mojibake(name)

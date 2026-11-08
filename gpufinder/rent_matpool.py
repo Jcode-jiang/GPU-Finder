@@ -115,13 +115,15 @@ class MatpoolRenter:
             hardware = ((pool.get("machine") or {}).get("hardware") or {})
             millicent = hardware.get("discountPriceMillicent") or hardware.get("priceMillicent")
             p = round(float(millicent) / 100000.0, 4) if millicent else None
-            if price is not None and p is not None and abs(p - price) > 0.001:
-                continue
             candidates.append((pool, {"price": p, "available": available}))
         if not candidates:
             if unsupported:
                 raise MatpoolRentError(f"{region} 是第三方资源池/云盘区域，当前版本暂不支持一键租卡")
             raise MatpoolRentError(f"{region} 当前没有可租的 {gpu_type}")
+        if price is not None:
+            exact = [x for x in candidates if x[1]["price"] is not None and abs(x[1]["price"] - float(price)) <= 0.001]
+            if exact:
+                candidates = exact
         candidates.sort(key=lambda x: (x[1]["price"] or 99, -x[1]["available"]))
         pool, info = candidates[0]
         image_id, image_name = self._default_image(pool)

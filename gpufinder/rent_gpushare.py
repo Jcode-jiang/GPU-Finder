@@ -191,11 +191,13 @@ class GpushareRenter:
             p = float(payg.get("price") or 0)
             if not math.isfinite(p) or p <= 0:
                 continue
-            if price is not None and abs(p - price) > 0.001:
-                continue
             candidates.append((m, p, idle))
         if not candidates:
             raise GpushareRentError(f"{region} 当前没有可租的 {gpu_type}")
+        if price is not None:
+            exact = [x for x in candidates if abs(x[1] - float(price)) <= 0.001]
+            if exact:
+                candidates = exact
         candidates.sort(key=lambda x: (x[1], -x[2]))
         machine, p, idle = candidates[0]
         max_price = float(self.settings.get("max_hourly_price") or 5)
