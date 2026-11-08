@@ -1,14 +1,32 @@
 # 发布检查清单
 
+## 当前结论
+
+**可以发布 2.1.0 beta / prerelease；不建议直接标成 stable。**
+
+已具备：
+
+- P0 安全回归、26 个测试、Ruff、密钥扫描通过；
+- AutoDL / 恒源云 / 矩池云（16区、1区）/ 优云智算真实创建 + SSH + 释放通过；
+- Universal（arm64 + x86_64）构建、干净目录启动验证通过；
+- CI 全绿。
+
+正式 stable 仍被以下事项阻塞：
+
+- `spctl -a` 结果为 **rejected**：当前是 ad-hoc 签名、未公证；
+- App 仍依赖外部 Python 3.9+，没有内嵌解释器；
+- 矩池云 17区第三方卷尚未支持；
+- 没有 Apple Developer ID / notary 凭据。
+
 ## 阻塞项
 
-- [ ] P0 安全回归通过：`python3 -m unittest discover -s tests`、`scripts/check_no_secrets.py`
-- [ ] 四个平台各用低预算账户完成一次真实创建、SSH、释放；记录订单与最终状态
-- [ ] 验证价格变化拒绝、重复 `request_id` 只创建一个实例、释放超时显示未确认
-- [ ] 验证恒源云定时关机（实验性）失败时有 warning
-- [ ] macOS 安装包在**没有源码目录**的机器上启动、获取行情、退出
-- [ ] 默认 Universal（arm64 + x86_64）；如只构建单架构，Release 说明必须标注
-- [ ] 未公证的 ad-hoc 包必须在 Release 说明中标注；正式分发使用 Developer ID + 公证
+- [x] P0 安全回归通过：`python3 -m unittest discover -s tests`、`scripts/check_no_secrets.py`
+- [x] 四个平台支持路径完成真实创建、SSH、释放（见 `docs/SMOKE.md`）
+- [x] 验证价格变化拒绝、重复 `request_id` 只创建一个实例、释放超时显示未确认
+- [x] 验证恒源云定时关机（实验性）失败时有 warning
+- [x] macOS 安装包在干净目录启动、获取行情、退出
+- [x] 默认 Universal（arm64 + x86_64）
+- [ ] 未公证的 ad-hoc 包必须在 Release 说明中标注；正式 stable 使用 Developer ID + 公证
 
 ## 签名与公证
 
