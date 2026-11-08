@@ -31,3 +31,6 @@ config.json
 
 # 构建产物
 *.zip
+
+# Ruff
+.ruff_cache/

@@ -31,8 +31,16 @@ jobs:
         with:
           name: macos-app
           path: dist/*
-      - name: Create GitHub Release
+      - name: Check existing release
+        id: existing
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}"             -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/${{ github.repository }}/releases/tags/${GITHUB_REF_NAME}")
+          echo "exists=$([ "$code" = "200" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') && steps.existing.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -40,5 +48,5 @@ jobs:
             dist/*.sha256
           generate_release_notes: true
           body: |
-            ⚠️ 该构建使用 ad-hoc 签名，未经过 Apple 公证；当前只构建 runner 架构。
+            ⚠️ 该构建为 Universal（arm64 + x86_64），使用 ad-hoc 签名，未经过 Apple 公证。
             需要 Python 3.9+，首次启动请阅读 README 的系统要求与隐私/费用说明。
