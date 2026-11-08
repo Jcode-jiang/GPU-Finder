@@ -225,7 +225,7 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 result = fn()
                 payload = {"ok": True, "instance": result}
-            except errors as exc:
+            except Exception as exc:  # noqa: BLE001 - 任何创建异常都必须返回可诊断结果
                 payload = {"ok": False, "error": str(exc)}
             status = 200 if payload.get("ok") else 400
             with self.idempotency_lock:

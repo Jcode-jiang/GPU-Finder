@@ -199,7 +199,7 @@ class AutoDLRenter:
                 continue
             if norm["region"] != region:
                 raise AutoDLRentError("机器所属地区已变化，请重新报价")
-            if norm["gpu"] != gpu_type:
+            if norm.get("gpu_name") != gpu_type:
                 raise AutoDLRentError("机器型号与报价不一致，请重新报价")
             if not norm["online"] or norm["idle"] <= 0:
                 raise AutoDLRentError("机器当前无空闲卡，请刷新后重试")

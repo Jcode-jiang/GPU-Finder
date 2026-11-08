@@ -394,10 +394,19 @@ class RentService:
         record.ssh_command = str(info.get("SshLoginCommand") or "")
         password = str(info.get("Password") or "")
         if password:
-            try:
-                record.password = base64.b64decode(password).decode("utf-8", "replace")
-            except Exception:  # noqa: BLE001
-                record.password = password
+            # UCloud 的 Password 可能是明文，也可能带 base64 包装。
+            # 16 位明文也可能全部落在 base64 字符集里，不能无条件解码。
+            decoded = None
+            if len(password) % 4 == 0 and all(
+                c.isalnum() or c in "+/=" for c in password
+            ):
+                try:
+                    candidate = base64.b64decode(password, validate=True).decode("utf-8")
+                    if candidate != password and candidate.isprintable() and "�" not in candidate:
+                        decoded = candidate
+                except Exception:  # noqa: BLE001
+                    decoded = None
+            record.password = decoded or password
         if record.state == "Running" and record.ip and not record.ssh_command:
             record.ssh_command = f"ssh root@{record.ip}"
         meta = record.meta or {}

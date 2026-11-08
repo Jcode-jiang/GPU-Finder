@@ -213,7 +213,7 @@ class RentGuardTest(unittest.TestCase):
 
         renter = AutoDLRenter(self._config(1.0))
         raw = {"machine_id": "m1"}
-        norm = {"region": "北京A区", "gpu": "RTX 4090", "online": True, "idle": 1, "price": 1.5}
+        norm = {"region": "北京A区", "gpu_name": "RTX 4090", "online": True, "idle": 1, "price": 1.5}
         renter._machines = lambda gpu: [(raw, norm)]
         with self.assertRaises(AutoDLRentError):
             renter._validated_machine("m1", "RTX 4090", "北京A区", 1.5)
@@ -253,6 +253,24 @@ class RentGuardTest(unittest.TestCase):
         pool["max_available_units"] = 0
         with self.assertRaises(MatpoolRentError):
             renter._validated_pool("p1", "RTX 4090", "1区", None)
+
+
+class CompsharePasswordTest(unittest.TestCase):
+    def test_plaintext_password_is_not_force_decoded(self) -> None:
+        from gpufinder.config import Config
+        from gpufinder.rent import InstanceRecord, RentService
+
+        svc = RentService(Config())
+        record = InstanceRecord(
+            uhost_id="u", region="r", zone="z", zone_name="z", gpu_type="g", gpu="g",
+            cpu=1, mem_gb=1, price=1.0, image_id="i", image_name="i", name="n", created_at="t",
+        )
+        svc._apply(record, {"Password": "abcdefghijklmnop"})
+        self.assertEqual(record.password, "abcdefghijklmnop")
+        import base64
+        encoded = base64.b64encode(b"secret-password").decode()
+        svc._apply(record, {"Password": encoded})
+        self.assertEqual(record.password, "secret-password")
 
 
 class ErrorSecurityTest(unittest.TestCase):
