@@ -20,6 +20,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import redact
+
 DEFAULT_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -28,7 +30,7 @@ DEFAULT_UA = (
 
 class HttpError(Exception):
     def __init__(self, message: str, status: int = 0, url: str = "") -> None:
-        super().__init__(message)
+        super().__init__(redact(message))
         self.status = status
         self.url = url
 

@@ -93,3 +93,15 @@ scripts/               图标、截图、页面探测
 tests/                 离线单元测试
 docs/                  文档与截图
 ```
+
+
+## 静态检查与发布
+
+```bash
+python3 -m ruff check gpufinder tests scripts
+python3 -m unittest discover -s tests
+./macos/build.sh              # 默认 Universal
+./scripts/package_release.sh  # 生成 zip + SHA-256
+```
+
+正式签名/公证与发布检查见 `docs/RELEASE.md`。

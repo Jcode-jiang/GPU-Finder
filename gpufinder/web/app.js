@@ -1030,6 +1030,21 @@
     }
   }
 
+  function isRunning(inst) {
+    return String(inst && inst.state || "").toLowerCase() === "running";
+  }
+
+  function stateLabel(state) {
+    const s = String(state || "").toLowerCase();
+    if (s === "running") return "运行中";
+    if (["creating", "starting", "pending", "initializing"].includes(s)) return "初始化中";
+    if (["stopping", "stopped", "shutdown", "offline"].includes(s)) return "已关机";
+    if (["releasing", "terminating", "deleted"].includes(s)) return "释放中";
+    if (s === "released" || s === "terminated") return "已释放";
+    if (s === "error" || s === "failed" || s.startsWith("shutdown_by")) return "异常";
+    return state || "状态未知";
+  }
+
   function startRentPolling(id) {
     clearInterval(state.rent.timer);
     state.rent.timer = setInterval(async () => {
@@ -1093,12 +1108,25 @@
     rows.forEach(([k, v]) => {
       const row = el("div", "ssh-row");
       row.appendChild(el("span", "k", k));
-      const val = el("span", "v", v);
-      val.title = v;
+      const isPassword = k === "密码" && !v.startsWith("等待");
+      const val = el("span", "v", isPassword ? "••••••••" : v);
+      val.title = isPassword ? "密码已隐藏，点击“显示”查看" : v;
       row.appendChild(val);
-      const btn = el("button", "copy-btn", "复制");
+      if (isPassword) {
+        let shown = false;
+        const toggle = el("button", "copy-btn", "显示");
+        toggle.type = "button";
+        toggle.addEventListener("click", () => {
+          shown = !shown;
+          val.textContent = shown ? v : "••••••••";
+          val.title = shown ? "密码已显示，注意旁边的人" : "密码已隐藏，点击“显示”查看";
+          toggle.textContent = shown ? "隐藏" : "显示";
+        });
+        row.appendChild(toggle);
+      }
+      const btn = el("button", "copy-btn", isPassword ? "复制密码" : "复制");
       btn.type = "button";
-      btn.addEventListener("click", () => copyText(v, k));
+      btn.addEventListener("click", () => copyText(v, isPassword ? "密码（注意剪贴板风险）" : k));
       row.appendChild(btn);
       box.appendChild(row);
     });
@@ -1227,6 +1255,27 @@
       state.preset = "all";
       render();
     });
+    const syncButton = $("#sync-compshare");
+    if (syncButton) {
+      syncButton.addEventListener("click", async () => {
+        syncButton.disabled = true;
+        try {
+          const resp = await fetch("/api/rent/reconcile", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || "同步失败");
+          toast(`已同步 ${data.instances?.length ?? 0} 个实例`);
+          await loadInstances();
+        } catch (err) {
+          toast(String(err.message || err));
+        } finally {
+          syncButton.disabled = false;
+        }
+      });
+    }
     $("#only-available").addEventListener("change", (e) => {
       state.onlyAvailable = e.target.checked;
       render();

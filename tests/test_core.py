@@ -10,7 +10,6 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
 import urllib.request
-import urllib.request
 from pathlib import Path
 
 from gpufinder.gpu import normalize_gpu
@@ -157,7 +156,40 @@ class FakeProvider(base.Provider):
         ]
 
 
+class SlowProvider(base.Provider):
+    id = "slow"
+    name = "Slow"
+
+    def fetch(self, ctx: base.FetchContext):
+        import time
+
+        time.sleep(3)
+        return []
+
+
 class ServiceTest(unittest.TestCase):
+    def test_slow_provider_does_not_block_refresh_past_deadline(self) -> None:
+        import time
+        import gpufinder.service as service_mod
+
+        old = service_mod.PROVIDER_DEADLINE
+        service_mod.PROVIDER_DEADLINE = 0.2
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.environ["GPUFINDER_HOME"] = tmp
+                try:
+                    svc = GPUService(providers=[SlowProvider()])
+                    started = time.perf_counter()
+                    snap = svc._collect()
+                    elapsed = time.perf_counter() - started
+                    self.assertLess(elapsed, 1.5)
+                    self.assertEqual(snap.providers[0].mode, "error")
+                    self.assertIn("超时", snap.providers[0].message)
+                finally:
+                    os.environ.pop("GPUFINDER_HOME", None)
+        finally:
+            service_mod.PROVIDER_DEADLINE = old
+
     def test_refresh_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["GPUFINDER_HOME"] = tmp
@@ -168,6 +200,73 @@ class ServiceTest(unittest.TestCase):
                 self.assertEqual(snap["platforms"][0]["mode"], "live")
             finally:
                 os.environ.pop("GPUFINDER_HOME", None)
+
+
+class RentGuardTest(unittest.TestCase):
+    def _config(self, limit: float = 2.0):
+        from gpufinder.config import Config
+
+        return Config(rent={"enabled": True, "max_hourly_price": limit})
+
+    def test_autodl_rejects_price_drift_and_limit(self) -> None:
+        from gpufinder.rent_autodl import AutoDLRenter, AutoDLRentError
+
+        renter = AutoDLRenter(self._config(1.0))
+        raw = {"machine_id": "m1"}
+        norm = {"region": "北京A区", "gpu": "RTX 4090", "online": True, "idle": 1, "price": 1.5}
+        renter._machines = lambda gpu: [(raw, norm)]
+        with self.assertRaises(AutoDLRentError):
+            renter._validated_machine("m1", "RTX 4090", "北京A区", 1.5)
+        with self.assertRaises(AutoDLRentError):
+            renter._validated_machine("m1", "RTX 4090", "北京A区", 1.2)
+        ok = AutoDLRenter(self._config(2.0))
+        ok._machines = lambda gpu: [(raw, norm)]
+        self.assertEqual(ok._validated_machine("m1", "RTX 4090", "北京A区", None)[0], raw)
+
+    def test_gpushare_rejects_price_limit_and_wrong_region(self) -> None:
+        from gpufinder.rent_gpushare import GpushareRenter, GpushareRentError
+
+        renter = GpushareRenter(self._config(1.0))
+        raw = {
+            "machineId": "g1", "regionName": "华东", "gpuName": "RTX 4090",
+            "gpuNum": 8, "gpuUsed": 1, "isOnline": True, "status": 1,
+            "baseInfo": {"gpuName": "RTX 4090"}, "skuList": [{"skuName": "payg", "enable": 1, "price": 2.0}],
+        }
+        renter._machines = lambda: [raw]
+        with self.assertRaises(GpushareRentError):
+            renter._validated_machine("g1", "RTX 4090", "华东", 2.0)
+        with self.assertRaises(GpushareRentError):
+            renter._validated_machine("g1", "RTX 4090", "华北", 2.0)
+
+    def test_matpool_rejects_price_drift_and_empty_pool(self) -> None:
+        from gpufinder.rent_matpool import MatpoolRenter, MatpoolRentError
+
+        renter = MatpoolRenter(self._config(1.0))
+        pool = {
+            "resource_pool_id": "p1", "gpu_model": "RTX 4090", "domain": 0,
+            "max_available_units": 1, "machine": {"hardware": {"priceMillicent": 200000}},
+        }
+        renter._domains = {0: "1区"}
+        renter._market = lambda: {"pools": [pool]}
+        with self.assertRaises(MatpoolRentError):
+            renter._validated_pool("p1", "RTX 4090", "1区", 2.0)
+        pool["max_available_units"] = 0
+        with self.assertRaises(MatpoolRentError):
+            renter._validated_pool("p1", "RTX 4090", "1区", None)
+
+
+class ErrorSecurityTest(unittest.TestCase):
+    def test_redact_tokens_and_classify(self) -> None:
+        from gpufinder.errors import classify, error_payload, redact
+
+        raw = "Authorization: Bearer abcdefghijklmnop.mytoken and token=secretvalue"
+        cleaned = redact(raw)
+        self.assertNotIn("abcdefghijklmnop", cleaned)
+        self.assertNotIn("secretvalue", cleaned)
+        self.assertEqual(classify("HTTP 401 unauthorized"), "auth")
+        self.assertEqual(classify("账户余额不足"), "balance")
+        self.assertEqual(classify("当前资源不足，已租满"), "stock")
+        self.assertEqual(error_payload("timeout")["category"], "timeout")
 
 
 class HttpClientRetryTest(unittest.TestCase):
@@ -230,6 +329,8 @@ class ConfigSecurityTest(unittest.TestCase):
                     svc.update_settings({"max_hourly_price": float("nan")})
                 with self.assertRaises(ValueError):
                     svc.update_settings({"enabled": "not-a-bool"})
+                with self.assertRaises(ValueError):
+                    svc.update_settings({"max_active_instances": 0})
                 merged = svc.update_settings({"enabled": "false", "max_hourly_price": 3})
                 self.assertFalse(merged["enabled"])
                 self.assertEqual(merged["max_hourly_price"], 3.0)
@@ -356,10 +457,6 @@ class ServerTest(unittest.TestCase):
                 os.environ.pop("GPUFINDER_HOME", None)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AutodlParserTest(unittest.TestCase):
     def test_merge_and_price(self) -> None:
         from gpufinder.providers.autodl import merge_machines, normalize_item
@@ -405,3 +502,7 @@ class GpushareParserTest(unittest.TestCase):
         self.assertEqual(offers["RTX 5090"].stock, 3)
         self.assertTrue(offers["RTX 5090"].available)
         self.assertFalse(offers["RTX 4090"].available)
+
+
+if __name__ == "__main__":
+    unittest.main()

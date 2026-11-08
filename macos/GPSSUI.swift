@@ -164,10 +164,11 @@ struct RentInstance: Codable, Identifiable {
         let s = (state ?? "").lowercased()
         if s == "running" { return "运行中" }
         if s == "creating" || s == "starting" || s == "pending" { return "初始化中" }
-        if s == "stopped" || s == "shutdown" { return "已关机" }
-        if s == "released" { return "已释放" }
+        if s == "stopping" || s == "stopped" || s == "shutdown" || s == "offline" { return "已关机" }
+        if s == "releasing" || s == "terminating" { return "释放中" }
+        if s == "released" || s == "terminated" || s == "deleted" { return "已释放" }
         if s.hasPrefix("shutdown") || s == "error" || s == "failed" { return "异常" }
-        return state ?? "—"
+        return state ?? "状态未知"
     }
 }
 
@@ -436,7 +437,9 @@ final class BackendManager: ObservableObject {
             Bundle.main.resourceURL?.appendingPathComponent("python/bin/python3").path,
             "/usr/bin/python3",
             "/opt/homebrew/bin/python3",
+            "/opt/homebrew/opt/python@3.13/bin/python3",
             "/usr/local/bin/python3",
+            "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
         ].compactMap { $0 }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
@@ -462,6 +465,14 @@ final class BackendManager: ObservableObject {
         }
     }
 
+    private static func readSessionToken() -> String? {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/gpufinder/session.token")
+        guard let token = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func probe(port: Int) async -> URL? {
         guard let url = URL(string: "http://127.0.0.1:\(port)/api/health") else { return nil }
         var request = URLRequest(url: url)
@@ -471,6 +482,17 @@ final class BackendManager: ObservableObject {
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   obj["app"] as? String == "gpufinder" else { return nil }
+            // 仅凭 app=gpufinder 不足以信任：再执行一次带会话令牌的握手。
+            // 这样端口被旧版/其他实例占用时不会把敏感设置请求发错进程。
+            guard let tokenURL = URL(string: "http://127.0.0.1:\(port)/api/config"),
+                  let token = Self.readSessionToken() else { return nil }
+            var check = URLRequest(url: tokenURL)
+            check.timeoutInterval = 1.0
+            check.setValue(token, forHTTPHeaderField: "X-GPU-Finder-Token")
+            let (_, checkResponse) = try await URLSession.shared.data(for: check)
+            guard let checkHTTP = checkResponse as? HTTPURLResponse, checkHTTP.statusCode == 200 else {
+                return nil
+            }
             return URL(string: "http://127.0.0.1:\(port)")
         } catch {
             return nil
@@ -479,7 +501,7 @@ final class BackendManager: ObservableObject {
 
     private func spawn() {
         guard let python = pythonPath else {
-            error = "未找到 python3。请安装 Xcode Command Line Tools（xcode-select --install）。"
+            error = "未找到 Python 3.9+。请安装 Python（python.org 或 Homebrew）或 Xcode Command Line Tools。"
             starting = false
             return
         }

@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: 安全漏洞
-    url: https://github.com/OWNER/REPO/security/advisories/new
-    about: 请私下报告 token 泄露或租卡安全问题（把 OWNER/REPO 换成实际仓库）
+    url: https://github.com/Jcode-jiang/GPU-Finder/security/advisories/new
+    about: 请私下报告 token 泄露或租卡安全问题

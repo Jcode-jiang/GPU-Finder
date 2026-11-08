@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test
+        run: python3 -m unittest discover -s tests
+      - name: Build app
+        run: ./macos/build.sh
+      - name: Package app
+        id: package
+        run: |
+          OUT=$(./scripts/package_release.sh | tee /tmp/package.log | tail -2)
+          cat /tmp/package.log
+          echo "name=$(basename "$(grep '^▸ 产物:' /tmp/package.log | sed 's/^▸ 产物: //')")" >> "$GITHUB_OUTPUT"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: dist/*
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          body: |
+            ⚠️ 该构建使用 ad-hoc 签名，未经过 Apple 公证；当前只构建 runner 架构。
+            需要 Python 3.9+，首次启动请阅读 README 的系统要求与隐私/费用说明。

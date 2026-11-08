@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, cache_dir, config_path
+from .errors import error_payload
 from .models import now_iso
 from .rent import RentError, RentService
 from .rent_autodl import AutoDLRentError, AutoDLRenter
@@ -70,6 +71,24 @@ class APIHandler(BaseHTTPRequestHandler):
     create_locks: dict[str, threading.Lock] = {}
     idempotency: dict[tuple[str, str], tuple[float, dict[str, Any], int]] = {}
     idempotency_lock = threading.Lock()
+    api_semaphore: threading.BoundedSemaphore = threading.BoundedSemaphore(16)
+
+    def setup(self) -> None:
+        super().setup()
+        try:
+            self.connection.settimeout(30)
+        except OSError:
+            pass
+
+    def handle_one_request(self) -> None:
+        if not self.api_semaphore.acquire(blocking=False):
+            self._send_json({"ok": False, "error": "服务繁忙，请稍后重试"}, status=503)
+            self.close_connection = True
+            return
+        try:
+            super().handle_one_request()
+        finally:
+            self.api_semaphore.release()
 
     # ------------------------------------------------------------------ 基础
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -124,7 +143,7 @@ class APIHandler(BaseHTTPRequestHandler):
             pass
 
     def _send_error_json(self, message: str, status: int = 400) -> None:
-        self._send_json({"ok": False, "error": message}, status=status)
+        self._send_json(error_payload(message), status=status)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -570,6 +589,15 @@ class APIHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "quote": quote})
             return
 
+        if path == "/api/rent/reconcile":
+            try:
+                instances = self.rent.sync_from_cloud()
+            except RentError as exc:
+                self._send_error_json(str(exc), status=400)
+                return
+            self._send_json({"ok": True, "instances": instances})
+            return
+
         if path == "/api/rent/autodl/create":
             self._run_create(
                 "autodl", body,
@@ -726,6 +754,7 @@ class Server:
         self._create_locks = {name: threading.Lock() for name in ("compshare", "autodl", "gpushare", "matpool")}
         self._idempotency: dict[tuple[str, str], tuple[float, dict[str, Any], int]] = {}
         self._idempotency_lock = threading.Lock()
+        self._api_semaphore = threading.BoundedSemaphore(16)
         self._httpd: ThreadingHTTPServer | None = None
         self._scheduler: threading.Thread | None = None
         self._stop = threading.Event()
@@ -752,10 +781,12 @@ class Server:
             {"service": self.service, "rent": self.rent, "autodl_rent": self.autodl_rent,
              "gpushare_rent": self.gpushare_rent, "matpool_rent": self.matpool_rent,
              "session_token": self.token, "create_locks": self._create_locks,
-             "idempotency": self._idempotency, "idempotency_lock": self._idempotency_lock},
+             "idempotency": self._idempotency, "idempotency_lock": self._idempotency_lock,
+             "api_semaphore": self._api_semaphore},
         )
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
         self._httpd.daemon_threads = True
+        self._httpd.request_queue_size = 32
         self.port = self._httpd.server_address[1]
         handler.port = self.port
         threading.Thread(target=self._httpd.serve_forever, name="gpufinder-http", daemon=True).start()

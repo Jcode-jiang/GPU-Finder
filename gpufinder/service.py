@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, state_path
+from .errors import redact
 from .http import HttpClient
 from .models import Offer, ProviderResult, Snapshot
 from .providers import DEFAULT_PROVIDERS, FetchContext, Provider
@@ -118,7 +119,8 @@ class GPUService:
         active = [p for p in self.providers if p.id not in disabled]
 
         results: dict[str, ProviderResult] = {}
-        with ThreadPoolExecutor(max_workers=max(1, len(active)), thread_name_prefix="provider") as pool:
+        pool = ThreadPoolExecutor(max_workers=max(1, len(active)), thread_name_prefix="provider")
+        try:
             futures = {pool.submit(p.run, ctx): p for p in active}
             done, pending = wait(futures, timeout=PROVIDER_DEADLINE)
             for fut in done:
@@ -131,7 +133,7 @@ class GPUService:
                         provider_name=prov.name,
                         ok=False,
                         mode="error",
-                        message=f"{type(exc).__name__}: {exc}",
+                        message=redact(f"{type(exc).__name__}: {exc}"),
                         homepage=prov.homepage,
                         accent=prov.accent,
                     )
@@ -146,6 +148,12 @@ class GPUService:
                     homepage=prov.homepage,
                     accent=prov.accent,
                 )
+        finally:
+            # wait() 只负责等；ThreadPoolExecutor 的 with 退出会再次 join，
+            # 从而把 28 秒 soft deadline 拖成无限等待。这里不等待未完成任务。
+            for future in locals().get("pending", []):
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
         all_offers: list[Offer] = []
         for res in results.values():
@@ -189,6 +197,10 @@ class GPUService:
             },
         }
         try:
+            if path.exists() and path.stat().st_size > 2_000_000:
+                # 历史缓存只保留最近 1000 条，避免长期运行无限增长。
+                lines = path.read_text("utf-8", errors="replace").splitlines()[-1000:]
+                path.write_text("\n".join(lines) + ("\n" if lines else ""), "utf-8")
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError:

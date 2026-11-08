@@ -97,6 +97,16 @@
 
 ---
 
+## 系统要求
+
+- macOS 13+；
+- **Python 3.9+**：当前状态栏 App 未内嵌 Python 解释器，会使用系统/Homebrew/python.org 安装；
+- 默认构建 **Universal**（arm64 + x86_64）；可用 `TARGET=...` 只构建单架构；
+- 未设置 `CODESIGN_IDENTITY` 时使用 ad-hoc 签名、未公证；正式分发见 `docs/RELEASE.md`；
+- 不需要任何第三方 Python 包，也不联网安装依赖。
+
+安装/卸载见 [docs/INSTALL.md](docs/INSTALL.md)，隐私说明见 [docs/PRIVACY.md](docs/PRIVACY.md)，发布流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+
 ## 快速开始
 
 ```bash

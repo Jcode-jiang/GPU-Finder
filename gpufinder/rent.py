@@ -427,6 +427,53 @@ class RentService:
                 pass
         return [self._public(r) for r in records]
 
+    def sync_from_cloud(self) -> list[dict[str, Any]]:
+        """从优云智算反查实例，恢复本地记录丢失/损坏后的对账。
+
+        只新增和更新，不因为一次列表缺页就释放本地记录；释放仍走显式 terminate。
+        """
+        api = self._api()
+        try:
+            data = api.call("DescribeCompShareInstance", {"Limit": 100})
+        except (ProviderError, AuthRequired) as exc:
+            raise RentError(f"云端实例对账失败：{exc}") from exc
+        infos = [r for r in (data.get("UHostSet") or []) if isinstance(r, dict)]
+        now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with self._lock:
+            by_id = {r.uhost_id: r for r in self._records}
+            for info in infos:
+                uid = str(info.get("UHostId") or "")
+                if not uid or str(info.get("State") or "") in ("Terminated", "Terminating"):
+                    continue
+                record = by_id.get(uid)
+                if record is None:
+                    price = info.get("InstancePrice")
+                    try:
+                        price_value = float(price) if price is not None else None
+                    except (TypeError, ValueError):
+                        price_value = None
+                    record = InstanceRecord(
+                        uhost_id=uid,
+                        region=str(info.get("Region") or ""),
+                        zone=str(info.get("Zone") or ""),
+                        zone_name=str(info.get("Zone") or ""),
+                        gpu_type=str(info.get("GpuType") or ""),
+                        gpu=str(info.get("GpuType") or ""),
+                        cpu=int(info.get("CPU") or 0),
+                        mem_gb=int(info.get("Memory") or 0) // 1024,
+                        price=price_value,
+                        image_id=str(info.get("CompShareImageId") or ""),
+                        image_name=str(info.get("CompShareImageName") or ""),
+                        name=str(info.get("Name") or uid),
+                        created_at=now,
+                        meta={"source": "cloud_sync"},
+                    )
+                    self._records.append(record)
+                    by_id[uid] = record
+                self._apply(record, info)
+            self._save()
+        return [self._public(r) for r in self._records]
+
     def refresh_one(self, uhost_id: str) -> dict[str, Any]:
         with self._lock:
             record = next((r for r in self._records if r.uhost_id == uhost_id), None)
