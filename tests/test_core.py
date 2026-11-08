@@ -273,6 +273,16 @@ class CompsharePasswordTest(unittest.TestCase):
         self.assertEqual(record.password, "secret-password")
 
 
+class TimestampNormalizationTest(unittest.TestCase):
+    def test_gpushare_iso_timestamp_is_int(self) -> None:
+        from gpufinder.rent_gpushare import GpushareRenter
+
+        value = GpushareRenter._timestamp("2026-11-08T11:50:49.000Z")
+        self.assertIsInstance(value, int)
+        self.assertGreater(value or 0, 1_700_000_000)
+        self.assertIsNone(GpushareRenter._timestamp("not-a-date"))
+
+
 class ErrorSecurityTest(unittest.TestCase):
     def test_redact_tokens_and_classify(self) -> None:
         from gpufinder.errors import classify, error_payload, redact
