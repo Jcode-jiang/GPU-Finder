@@ -159,12 +159,20 @@ class MatpoolRenter:
             i for i in images
             if "pytorch" in (str(i.get("alias") or "") + " " + str(i.get("description") or "")).lower()
         ]
+        # 优先“Pytorch 2.8.0”这类基础镜像，避免选中 wan-dancer / ComfyUI
+        # 等应用镜像；应用镜像可能依赖卷或长时间初始化，导致实例一直 starting。
+        base = [
+            i for i in torch
+            if re.fullmatch(r"pytorch\s+\d+(?:\.\d+)*", str(i.get("alias") or "").strip(), re.I)
+        ]
+        if base:
+            torch = base
         if policy != "latest":
             capped = [i for i in torch if cuda(str(i.get("description") or "")) <= 12.8]
             if capped:
                 torch = capped
         if not torch:
-            raise MatpoolRentError("矩池云没有可用的 PyTorch 镜像")
+            raise MatpoolRentError("矩池云没有可用的 PyTorch 基础镜像")
         torch.sort(key=lambda i: (cuda(str(i.get("description") or "")), i.get("id") or 0), reverse=True)
         img = torch[0]
         return int(img["id"]), str(img.get("alias") or f"image-{img['id']}")
@@ -228,9 +236,11 @@ class MatpoolRenter:
             "hardware_qty": 1,
             "auto_password": True,
             "vnc_switcher": True,
-            "mount_infos": json.dumps([{"source": "/", "dest": "/mnt", "readOnly": False}]),
             "image_id": int(image_id),
         }
+        # 第三方资源池（如 17区）没有自营卷，发送 mount_infos 会报 volume not exist。
+        if pool.get("is_cn_resource", True):
+            payload["mount_infos"] = json.dumps([{"source": "/", "dest": "/mnt", "readOnly": False}])
         data = self._send("POST", "/node", payload)
         node = data.get("node") or data.get("data") or {}
         node_id = node.get("id") if isinstance(node, dict) else None
