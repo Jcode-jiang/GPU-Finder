@@ -95,6 +95,7 @@ class MatpoolRenter:
 
     def quote(self, gpu_type: str, region: str, price: float | None = None) -> dict[str, Any]:
         data = self._market()
+        unsupported = False
         candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for pool in data.get("pools") or []:
             norm = normalize_gpu(str(pool.get("gpu_model") or ""))
@@ -104,8 +105,9 @@ class MatpoolRenter:
             name = _region_name(domain, self._domains or {})
             if name != region:
                 continue
-            if not pool.get("is_cn_resource", True):
-                # 17区等第三方资源池需要额外云盘/卷挂载，当前创建路径不支持。
+            if int(pool.get("domain") or 0) == 17:
+                # 17区第三方资源池需要额外云盘/卷挂载，当前创建路径不支持。
+                unsupported = True
                 continue
             available = int(pool.get("max_available_units") or 0)
             if available <= 0:
@@ -117,9 +119,9 @@ class MatpoolRenter:
                 continue
             candidates.append((pool, {"price": p, "available": available}))
         if not candidates:
-            raise MatpoolRentError(
-                f"{region} 当前没有可租的 {gpu_type}（第三方资源池/云盘区域暂不支持一键租卡）"
-            )
+            if unsupported:
+                raise MatpoolRentError(f"{region} 是第三方资源池/云盘区域，当前版本暂不支持一键租卡")
+            raise MatpoolRentError(f"{region} 当前没有可租的 {gpu_type}")
         candidates.sort(key=lambda x: (x[1]["price"] or 99, -x[1]["available"]))
         pool, info = candidates[0]
         image_id, image_name = self._default_image(pool)
@@ -196,8 +198,8 @@ class MatpoolRenter:
             domain = int(pool.get("domain") or 0)
             if _region_name(domain, self._domains or {}) != region:
                 raise MatpoolRentError("资源池地区已变化，请重新报价")
-            if not pool.get("is_cn_resource", True):
-                raise MatpoolRentError("该区域是第三方资源池，需云盘挂载；当前版本暂不支持一键租卡")
+            if int(pool.get("domain") or 0) == 17:
+                raise MatpoolRentError("17区是第三方资源池，需云盘挂载；当前版本暂不支持一键租卡")
             if int(pool.get("max_available_units") or 0) <= 0:
                 raise MatpoolRentError("资源池当前无空闲卡，请刷新后重试")
             hardware = ((pool.get("machine") or {}).get("hardware") or {})
