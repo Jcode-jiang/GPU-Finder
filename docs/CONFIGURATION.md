@@ -94,7 +94,8 @@ GPUFINDER_MATPOOL_USER_ID
 | `matpool_image_policy` | `"auto"` | 矩池云镜像偏好：`auto` / `latest` |
 | `disk_gb` | `100` | 优云智算系统盘大小 |
 | `auto_stop_minutes` | `60` | 创建后定时关机分钟数；`0` 表示不设置 |
-| `max_hourly_price` | `5` | 价格上限（元/卡/小时），超过直接拒绝 |
+| `max_hourly_price` | `5` | 价格上限（元/卡/小时），必须为有限正数，超过直接拒绝 |
+| `max_active_instances` | `2` | 每个平台最多同时运行的实例数（1..10） |
 | `name_prefix` | `gpufinder` | 实例名前缀 |
 
 ## 命令行修改

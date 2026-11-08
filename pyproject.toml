@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpufinder"
-version = "2.0.1"
+version = "2.1.0"
 description = "多平台 GPU 算力行情与一键租卡：AutoDL、矩池云、优云智算、恒源云"
 readme = "README.md"
 requires-python = ">=3.9"

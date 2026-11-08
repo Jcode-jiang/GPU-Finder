@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import urllib.error
+import urllib.request
 import urllib.request
 from pathlib import Path
 
@@ -166,7 +170,117 @@ class ServiceTest(unittest.TestCase):
                 os.environ.pop("GPUFINDER_HOME", None)
 
 
+class HttpClientRetryTest(unittest.TestCase):
+    def test_mutating_request_is_not_retried(self) -> None:
+        from gpufinder.http import HttpClient, HttpError
+
+        hits = {"n": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                hits["n"] += 1
+                self.send_response(500)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):  # noqa: D401
+                return
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = HttpClient(timeout=3, retries=3)
+            response = client.post_json(f"http://127.0.0.1:{httpd.server_address[1]}/pay", {})
+            self.assertEqual(response.status, 500)
+            self.assertEqual(hits["n"], 1)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class ConfigSecurityTest(unittest.TestCase):
+    def test_env_credentials_are_not_persisted_or_prefixed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["GPUFINDER_HOME"] = tmp
+            os.environ["GPUFINDER_AUTODL_TOKEN"] = "env-secret-token-value"
+            try:
+                from gpufinder.config import Config
+
+                cfg = Config.load()
+                self.assertEqual(cfg.credential("autodl_token"), "env-secret-token-value")
+                path = cfg.save()
+                saved = json.loads(path.read_text("utf-8"))
+                self.assertNotIn("env-secret-token-value", json.dumps(saved))
+                self.assertEqual(cfg.masked_credentials()["autodl_token"]["hint"], "已设置")
+            finally:
+                os.environ.pop("GPUFINDER_AUTODL_TOKEN", None)
+                os.environ.pop("GPUFINDER_HOME", None)
+
+    def test_rent_settings_reject_invalid_values(self) -> None:
+        from gpufinder.config import Config
+        from gpufinder.rent import RentService
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["GPUFINDER_HOME"] = tmp
+            try:
+                svc = RentService(Config.load())
+                with self.assertRaises(ValueError):
+                    svc.update_settings({"max_hourly_price": float("nan")})
+                with self.assertRaises(ValueError):
+                    svc.update_settings({"enabled": "not-a-bool"})
+                merged = svc.update_settings({"enabled": "false", "max_hourly_price": 3})
+                self.assertFalse(merged["enabled"])
+                self.assertEqual(merged["max_hourly_price"], 3.0)
+            finally:
+                os.environ.pop("GPUFINDER_HOME", None)
+
+
 class ServerTest(unittest.TestCase):
+    def test_create_is_idempotent_by_request_id(self) -> None:
+        from gpufinder.server import Server
+
+        class FakeRenter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def active_count(self) -> int:
+                return 0
+
+            def create(self, *args, **kwargs):
+                self.calls += 1
+                return {"platform": "autodl", "uhost_id": "new-instance", "state": "creating"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["GPUFINDER_HOME"] = tmp
+            try:
+                svc = GPUService(providers=[FakeProvider()])
+                svc.refresh()
+                srv = Server(svc, 0)
+                fake = FakeRenter()
+                srv.autodl_rent = fake
+                srv.start()
+                try:
+                    base_url = f"http://127.0.0.1:{srv.port}"
+                    body = json.dumps({
+                        "machine_id": "m1", "image_id": "i1", "confirm": "RENT",
+                        "gpu_type": "RTX 4090", "region": "北京A区", "price": 1.5,
+                        "request_id": "test-request-0001",
+                    }).encode("utf-8")
+                    headers = {"Content-Type": "application/json", "X-GPU-Finder-Token": srv.token}
+                    for _ in range(2):
+                        with urllib.request.urlopen(urllib.request.Request(
+                            base_url + "/api/rent/autodl/create", data=body, method="POST", headers=headers,
+                        ), timeout=5) as resp:
+                            payload = json.loads(resp.read())
+                        self.assertTrue(payload["ok"])
+                    self.assertEqual(fake.calls, 1)
+                finally:
+                    srv.stop()
+            finally:
+                os.environ.pop("GPUFINDER_HOME", None)
+
     def test_api(self) -> None:
         from gpufinder.server import Server
 
@@ -192,6 +306,50 @@ class ServerTest(unittest.TestCase):
                     with urllib.request.urlopen(base_url + "/", timeout=5) as resp:
                         html = resp.read().decode("utf-8")
                     self.assertIn("GPU Finder", html)
+                    self.assertNotIn("__GPU_FINDER_TOKEN__", html)
+                    self.assertIn(srv.token, html)
+
+                    body = json.dumps({"overview_families": []}).encode("utf-8")
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(urllib.request.Request(
+                            base_url + "/api/config", data=body, method="POST",
+                            headers={"Content-Type": "application/json"},
+                        ), timeout=5)
+                    self.assertEqual(ctx.exception.code, 403)
+
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(base_url + "/api/config", timeout=5)
+                    self.assertEqual(ctx.exception.code, 403)
+
+                    with urllib.request.urlopen(urllib.request.Request(
+                        base_url + "/api/config",
+                        headers={"X-GPU-Finder-Token": srv.token},
+                    ), timeout=5) as resp:
+                        self.assertEqual(resp.status, 200)
+
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(urllib.request.Request(
+                            base_url + "/api/config", data=body, method="POST",
+                            headers={
+                                "Content-Type": "application/json",
+                                "X-GPU-Finder-Token": srv.token,
+                                "Origin": "https://evil.example",
+                            },
+                        ), timeout=5)
+                    self.assertEqual(ctx.exception.code, 403)
+
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(urllib.request.Request(
+                            base_url + "/api/config", data=body, method="POST",
+                            headers={"Content-Type": "text/plain", "X-GPU-Finder-Token": srv.token},
+                        ), timeout=5)
+                    self.assertEqual(ctx.exception.code, 415)
+
+                    with urllib.request.urlopen(urllib.request.Request(
+                        base_url + "/api/config", data=body, method="POST",
+                        headers={"Content-Type": "application/json", "X-GPU-Finder-Token": srv.token},
+                    ), timeout=5) as resp:
+                        self.assertEqual(resp.status, 200)
                 finally:
                     srv.stop()
             finally:

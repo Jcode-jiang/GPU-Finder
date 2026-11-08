@@ -96,7 +96,13 @@ class HttpClient:
         if headers:
             hdrs.update(headers)
 
-        attempts = self.retries if retries is None else retries
+        # 安全边界：只有幂等请求允许默认重试。
+        # 创建/释放实例等 POST/PUT/DELETE 绝不能因超时被盲目重发。
+        safe_method = method.upper() in {"GET", "HEAD", "OPTIONS"}
+        if safe_method:
+            attempts = self.retries if retries is None else retries
+        else:
+            attempts = 0
         last_err: Exception | None = None
         for attempt in range(attempts + 1):
             req = urllib.request.Request(url, data=data, headers=hdrs, method=method)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import urllib.parse
@@ -70,6 +71,9 @@ class MatpoolRenter:
             raise MatpoolRentError(f"矩池云：{data.get('msg') or '未知错误'}")
         return data
 
+    def active_count(self) -> int:
+        return sum(1 for item in self.instances() if not item.get("released"))
+
     def balance(self) -> float:
         """矩池云余额（元）。account.balance 单位是分。"""
         data = self._get("/user/account")
@@ -134,11 +138,14 @@ class MatpoolRenter:
             "enabled": bool((self.config.rent or {}).get("enabled")),
         }
 
-    def _default_image(self, pool: dict[str, Any]) -> tuple[int, str]:
-        images = self._get(
+    def _pool_images(self, pool: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._get(
             "/images",
             {"resource_pool_id": pool.get("resource_pool_id"), "machine_category": 0, "page": 1, "per_page": 50},
         ).get("images") or []
+
+    def _default_image(self, pool: dict[str, Any]) -> tuple[int, str]:
+        images = self._pool_images(pool)
 
         def cuda(text: str) -> float:
             m = re.search(r"CUDA\s+([0-9]+(?:\.[0-9]+)?)", text or "", re.I)
@@ -162,11 +169,59 @@ class MatpoolRenter:
         img = torch[0]
         return int(img["id"]), str(img.get("alias") or f"image-{img['id']}")
 
-    def create(self, resource_pool_id: str, image_id: str, name: str = "", confirm: str = "") -> dict[str, Any]:
+    def _validated_pool(self, resource_pool_id: str, gpu_type: str, region: str,
+                        price: float | None) -> dict[str, Any]:
+        if not resource_pool_id or not gpu_type or not region:
+            raise MatpoolRentError("创建参数不完整：缺少 machine_id / gpu_type / region")
+        data = self._market()
+        for pool in data.get("pools") or []:
+            if str(pool.get("resource_pool_id") or "") != str(resource_pool_id):
+                continue
+            norm = normalize_gpu(str(pool.get("gpu_model") or ""))
+            if not norm or norm[0] != gpu_type:
+                raise MatpoolRentError("资源池型号与报价不一致，请重新报价")
+            domain = int(pool.get("domain") or 0)
+            if _region_name(domain, self._domains or {}) != region:
+                raise MatpoolRentError("资源池地区已变化，请重新报价")
+            if int(pool.get("max_available_units") or 0) <= 0:
+                raise MatpoolRentError("资源池当前无空闲卡，请刷新后重试")
+            hardware = ((pool.get("machine") or {}).get("hardware") or {})
+            millicent = hardware.get("discountPriceMillicent") or hardware.get("priceMillicent")
+            if not millicent:
+                raise MatpoolRentError("无法获取有效价格，已拒绝创建")
+            current = round(float(millicent) / 100000.0, 4)
+            if not math.isfinite(current) or current <= 0:
+                raise MatpoolRentError("无法获取有效价格，已拒绝创建")
+            if price is not None:
+                try:
+                    expected = float(price)
+                except (TypeError, ValueError) as exc:
+                    raise MatpoolRentError("报价参数无效，已拒绝创建") from exc
+                if not math.isfinite(expected) or abs(current - expected) > 0.001:
+                    raise MatpoolRentError(
+                        f"报价已从 ¥{expected:.2f}/时 变为 ¥{current:.2f}/时，已拒绝创建"
+                    )
+            limit = float((self.config.rent or {}).get("max_hourly_price") or 5)
+            if not math.isfinite(limit) or limit <= 0:
+                raise MatpoolRentError("价格上限配置无效，已拒绝创建")
+            if current > limit:
+                raise MatpoolRentError(f"价格 ¥{current:.2f}/时 超过设置上限 ¥{limit:.2f}/时")
+            return pool
+        raise MatpoolRentError("目标资源池已下架或不存在，请重新报价")
+
+    def create(self, resource_pool_id: str, image_id: str, name: str = "", confirm: str = "",
+               gpu_type: str = "", region: str = "", price: float | None = None) -> dict[str, Any]:
         if confirm != "RENT":
             raise MatpoolRentError("需要二次确认（confirm=RENT）")
         if not (self.config.rent or {}).get("enabled"):
             raise MatpoolRentError("租卡功能未启用，请先在设置中打开并保存")
+        pool = self._validated_pool(resource_pool_id, gpu_type, region, price)
+        if not str(image_id).isdigit():
+            raise MatpoolRentError("缺少有效镜像 ID，已拒绝创建")
+        image_ids = {str(i.get("id")) for i in self._pool_images(pool)}
+        if str(image_id) not in image_ids:
+            raise MatpoolRentError("镜像不在该资源池中，请重新报价")
+        before_ids = {item["uhost_id"] for item in self.instances()}
         payload = {
             "resource_pool_id": resource_pool_id,
             "machine_category": 0,
@@ -179,13 +234,26 @@ class MatpoolRenter:
         data = self._send("POST", "/node", payload)
         node = data.get("node") or data.get("data") or {}
         node_id = node.get("id") if isinstance(node, dict) else None
-        if not node_id:
-            # 有些返回只给 request_id，去列表里找最新的节点
+        if node_id:
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    return self.instance(int(node_id))
+                except MatpoolRentError:
+                    time.sleep(3)
+            raise MatpoolRentError("创建接口返回了实例 ID，但实例尚未出现在列表中，请刷新核对")
+        # 没有返回 ID 时，只能通过“创建前快照 + 唯一新节点”确认；
+        # 绝不能把用户账户里的第一个旧节点当作刚创建的实例。
+        deadline = time.time() + 30
+        while time.time() < deadline:
             nodes = self.instances()
-            if nodes:
-                return nodes[0]
-            raise MatpoolRentError("创建成功但没有返回实例 ID")
-        return self.instance(int(node_id))
+            new_nodes = [n for n in nodes if n.get("uhost_id") and n["uhost_id"] not in before_ids]
+            if len(new_nodes) == 1:
+                return new_nodes[0]
+            if len(new_nodes) > 1:
+                raise MatpoolRentError("检测到多个新实例，无法确认本次创建结果，请到控制台核对后再操作")
+            time.sleep(3)
+        raise MatpoolRentError("创建请求已发送，但无法确认实例 ID；请到矩池云控制台核对，切勿重复下单")
 
     def instances(self) -> list[dict[str, Any]]:
         data = self._get("/nodes", {"page": 1, "per_page": 50})
@@ -248,24 +316,46 @@ class MatpoolRenter:
         }
 
     def terminate(self, node_id: str) -> dict[str, Any]:
-        self._send("DELETE", "/node", {"id": int(node_id)})
+        try:
+            numeric_id = int(node_id)
+        except (TypeError, ValueError) as exc:
+            raise MatpoolRentError("无效的实例 ID") from exc
+        try:
+            current = self.instance(numeric_id)
+        except MatpoolRentError as exc:
+            # instance() 只会在列表请求成功且确实不存在时抛这句；网络失败必须区分。
+            try:
+                nodes = self.instances()
+            except MatpoolRentError as list_exc:
+                raise MatpoolRentError(f"无法确认实例当前状态，释放未执行：{list_exc}") from list_exc
+            if not any(n.get("uhost_id") == str(node_id) for n in nodes):
+                return self._released(node_id)
+            raise MatpoolRentError(f"无法确认实例当前状态，释放未执行：{exc}") from exc
+        if current.get("released") is True:
+            return current
+        self._send("DELETE", "/node", {"id": numeric_id})
         deadline = time.time() + 180
         while time.time() < deadline:
             time.sleep(4)
             try:
-                info = self.instance(int(node_id))
+                nodes = self.instances()
             except MatpoolRentError:
-                info = None
-            if info is None or info.get("state") in ("released", "stopped"):
-                if info is not None:
-                    info["released"] = True
-                    return info
-                return {
-                    "platform": "matpool", "uhost_id": node_id, "state": "released", "released": True,
-                    "region": "", "zone": "", "zone_name": "", "gpu_type": "", "gpu": "",
-                    "cpu": None, "mem_gb": None, "price": None, "image_name": "", "name": node_id,
-                    "ip": "", "ssh_command": "", "password": "", "auto_stop_at": None,
-                    "error": "", "warning": "",
-                    "ssh": {"command": "", "password": "", "ip": "", "user": "root"},
-                }
-        raise MatpoolRentError("释放请求已发送，但实例仍在列表中，请稍后刷新")
+                continue
+            found = next((n for n in nodes if n.get("uhost_id") == str(node_id)), None)
+            if found is None:
+                return self._released(node_id)
+            if found.get("released") is True:
+                return found
+            # stopped 只是关机，不等于销毁/停止计费，继续等待。
+        raise MatpoolRentError("释放请求已发送，但 180 秒内未确认销毁；结果未确认，请到矩池云控制台核实")
+
+    @staticmethod
+    def _released(node_id: str) -> dict[str, Any]:
+        return {
+            "platform": "matpool", "uhost_id": node_id, "state": "released", "released": True,
+            "region": "", "zone": "", "zone_name": "", "gpu_type": "", "gpu": "",
+            "cpu": None, "mem_gb": None, "price": None, "image_name": "", "name": node_id,
+            "ip": "", "ssh_command": "", "password": "", "auto_stop_at": None,
+            "error": "", "warning": "",
+            "ssh": {"command": "", "password": "", "ip": "", "user": "root"},
+        }

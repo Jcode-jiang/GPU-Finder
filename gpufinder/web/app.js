@@ -2,6 +2,19 @@
 (() => {
   "use strict";
 
+  const GF_SESSION = (document.querySelector('meta[name="gf-session"]')?.content || "").trim();
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const rawURL = typeof input === "string" ? input : (input && input.url) || "";
+    const url = new URL(rawURL, window.location.origin);
+    if (url.origin === window.location.origin && url.pathname.startsWith("/api/")) {
+      const headers = new Headers(init.headers || {});
+      if (GF_SESSION) headers.set("X-GPU-Finder-Token", GF_SESSION);
+      init = { ...init, headers };
+    }
+    return nativeFetch(input, init);
+  };
+
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
@@ -670,6 +683,7 @@
         disk_gb: Number($("#rent-disk").value) || 100,
         auto_stop_minutes: Number($("#rent-autostop").value) || 0,
         max_hourly_price: Number($("#rent-maxprice").value) || 5,
+        max_active_instances: Number($("#rent-max-instances").value) || 2,
       },
     };
     const a = $("#token-autodl").value.trim();
@@ -738,6 +752,7 @@
       $("#rent-disk").value = (data.settings && data.settings.disk_gb) || 100;
       $("#rent-autostop").value = (data.settings && data.settings.auto_stop_minutes) || 0;
       $("#rent-maxprice").value = (data.settings && data.settings.max_hourly_price) || 5;
+      $("#rent-max-instances").value = (data.settings && data.settings.max_active_instances) || 2;
       $("#gpushare-autostop").value = (data.settings && data.settings.gpushare_auto_stop_minutes) ?? 60;
       $("#matpool-image-policy").value = (data.settings && data.settings.matpool_image_policy) || "auto";
       await Promise.all([
@@ -827,7 +842,15 @@
     sel.value = (settings && settings.autodl_image_id) || "";
   }
 
+  function makeRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
   function openRentModal() {
+    state.rent.requestId = makeRequestId();
     const modal = $("#rent-modal");
     modal.classList.add("open");
     modal.setAttribute("aria-hidden", "false");
@@ -977,10 +1000,12 @@
         ? {
             machine_id: q.machine_id, image_id: q.image_id, name: "", confirm: "RENT",
             gpu_type: q.gpu_type, region: q.region, price: q.price,
+            request_id: state.rent.requestId,
           }
         : {
             gpu_type: q.gpu_type, region: q.region, zone: q.zone,
             cpu: q.cpu, mem_gb: q.mem_gb, image_id: q.image_id, confirm: "RENT",
+            request_id: state.rent.requestId,
           };
       const resp = await fetch(endpoint, {
         method: "POST",

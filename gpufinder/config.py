@@ -77,6 +77,7 @@ class Config:
     rent: dict[str, Any] = field(default_factory=dict)
     overview_families: list[str] = field(default_factory=list)
     open_on_start: bool = False
+    _env_credentials: set[str] = field(default_factory=set, repr=False, compare=False)
 
     # ------------------------------------------------------------------ 读写
     @classmethod
@@ -89,9 +90,21 @@ class Config:
             except (OSError, ValueError):
                 raw = {}
         cfg = cls()
-        cfg.port = int(raw.get("port", cfg.port))
-        cfg.refresh_interval = int(raw.get("refresh_interval", cfg.refresh_interval))
-        cfg.request_timeout = float(raw.get("request_timeout", cfg.request_timeout))
+        try:
+            port = int(raw.get("port", cfg.port))
+            cfg.port = port if 1 <= port <= 65535 else cfg.port
+        except (TypeError, ValueError):
+            pass
+        try:
+            interval = int(raw.get("refresh_interval", cfg.refresh_interval))
+            cfg.refresh_interval = interval if 0 <= interval <= 86400 else cfg.refresh_interval
+        except (TypeError, ValueError):
+            pass
+        try:
+            timeout = float(raw.get("request_timeout", cfg.request_timeout))
+            cfg.request_timeout = timeout if 1 <= timeout <= 120 else cfg.request_timeout
+        except (TypeError, ValueError):
+            pass
         cfg.disabled_providers = list(raw.get("disabled_providers") or [])
         cfg.credentials = {k: str(v) for k, v in (raw.get("credentials") or {}).items() if v}
         cfg.rent = dict(raw.get("rent") or {})
@@ -105,6 +118,7 @@ class Config:
             val = os.environ.get(env)
             if val:
                 self.credentials[key] = val
+                self._env_credentials.add(key)
         if os.environ.get("GPUFINDER_PORT"):
             try:
                 self.port = int(os.environ["GPUFINDER_PORT"])
@@ -118,7 +132,11 @@ class Config:
             "refresh_interval": self.refresh_interval,
             "request_timeout": self.request_timeout,
             "disabled_providers": self.disabled_providers,
-            "credentials": self.credentials,
+            # 来自环境变量的凭据只在内存中使用，绝不回写到配置文件。
+            "credentials": {
+                k: v for k, v in self.credentials.items()
+                if k not in self._env_credentials
+            },
             "rent": self.rent,
             "overview_families": self.overview_families,
             "open_on_start": self.open_on_start,
@@ -144,6 +162,7 @@ class Config:
         if key not in CREDENTIAL_KEYS:
             raise KeyError(f"未知凭据: {key}")
         value = (value or "").strip()
+        self._env_credentials.discard(key)
         if value:
             self.credentials[key] = value
         else:
@@ -155,7 +174,7 @@ class Config:
             val = self.credential(key)
             out[key] = {
                 "configured": bool(val),
-                "hint": (val[:4] + "…" + val[-4:]) if len(val) > 10 else ("已设置" if val else ""),
+                "hint": "已设置" if val else "",
             }
         return out
 

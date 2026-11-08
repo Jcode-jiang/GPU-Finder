@@ -6,7 +6,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | 优云智算 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | AutoDL | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 恒源云 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| 恒源云 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ 实验性 |
 | 矩池云 | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 
 矩池云创建需要 JWT + `x-matpool-user-id` 两个凭据；未提供时只显示行情。
@@ -16,13 +16,13 @@
 
 | 设置 | 生效平台 |
 | --- | --- |
-| 启用一键租卡 / 价格上限 | 所有平台 |
+| 启用一键租卡 / 价格上限 / 最多同时运行实例 | 所有平台 |
 | 账户余额 | 四平台分别读取：优云智算 GetBalance / AutoDL wallet / 恒源云 account summary / 矩池云 user/account |
 | 优云智算镜像 / 系统盘 / 自动关机 | 优云智算 |
 | AutoDL 镜像（可选，留空自动） | AutoDL |
-| 恒源云镜像 / 自动关机 | 恒源云 |
+| 恒源云镜像 / 自动关机（实验性） | 恒源云 |
 | 矩池云镜像偏好 | 矩池云 |
-| 自动关机 | AutoDL + 优云智算 + 恒源云 |
+| 自动关机 | AutoDL + 优云智算 + 恒源云（实验性） |
 | 镜像自动选择 | 优云智算 / AutoDL / 恒源云 / 矩池云 |
 
 ## 通用安全边界
@@ -30,7 +30,7 @@
 1. 必须在设置里打开「启用一键租卡」；
 2. 每次创建都要在弹窗里勾选确认；
 3. 价格超过 `max_hourly_price` 直接拒绝；
-4. 默认按量计费，创建后按 `auto_stop_minutes` 设置定时关机；
+4. 默认按量计费，创建后按设置申请定时关机；**定时关机失败会明确警告**，且关机不等于释放，磁盘等资源可能继续计费；
 5. 释放时先关机，再删除/释放实例；
 6. SSH 密码不写入磁盘，需要时从平台接口重新获取。
 
@@ -44,7 +44,7 @@
 
 - 报价时从市场接口挑一台**空闲且实例/存储配额未满**的机器；
 - 镜像按机器 `highest_cuda_version` 过滤，避免 CUDA 13 镜像在只支持 12.x 的机器上启动失败；
-- 创建失败（已租满 / 存储满）会自动换同地区同价位机器重试；
+- 创建前按 machine_id 重新校验型号、地区、空闲卡、payg 价格与上限；失败不会自动换机重试；
 - 创建后用 `instance/timed/shutdown` 设置定时关机；
 - 释放：先 `power_off`，等状态变为 `shutdown`，再 `instance/release`；
 - 如果启动失败（`shutdown_by_starting_error`），会自动释放并报错。
@@ -56,7 +56,8 @@
 - 创建：`POST /api/instance/create`；
 - SSH：`/api/instance/list` 的 `toolsAttrs`（`key=ssh`）；
 - 释放：先 `actionName=stop`，等状态为 `stop`，再 `actionName=release`；
-- 暂不支持定时关机。
+- 定时关机：已接入 `POST /api/instance/set/schedule_stop`，标记为实验性；失败会在创建结果里给出 warning。
+- 释放超时不会显示成功，会返回「结果未确认」，需要到控制台核实。
 
 ## 矩池云（实验性）
 
@@ -67,7 +68,8 @@
 - 镜像：`GET /api/images?resource_pool_id=...`，选 PyTorch 且 CUDA ≤ 12.8 的镜像；
 - 创建：`POST /api/node`，body 包含 `resource_pool_id`、`hardware_qty`、`image_id`、`mount_infos`；
 - 实例：`GET /api/nodes`，SSH 来自 `node.ports` 与 `sshAuths`；
-- 释放：`DELETE /api/node`，body `{"id": ...}`。
+- 释放：`DELETE /api/node`，body `{"id": ...}`；只有确认节点消失或状态为 released 才算成功，stopped 不算释放。
+- 创建响应缺少节点 ID 时，使用“创建前快照 + 唯一新节点”匹配；无法确认时返回待确认，绝不拿旧节点冒充。
 - 注意：平台可能返回 `53 insufficient resource` 或 `187 auth cert`；前者是库存/容量问题，后者是凭据缺失。
 
 ## 失败处理

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import secrets
 import socket
 import sys
 import threading
@@ -19,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .config import Config, config_path
+from .config import Config, cache_dir, config_path
 from .models import now_iso
 from .rent import RentError, RentService
 from .rent_autodl import AutoDLRentError, AutoDLRenter
@@ -29,7 +30,7 @@ from .presets import list_presets
 from .gpu import catalog_groups
 from .service import GPUService
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 
 _MIME = {
@@ -64,11 +65,51 @@ class APIHandler(BaseHTTPRequestHandler):
     autodl_rent: AutoDLRenter
     gpushare_rent: GpushareRenter
     matpool_rent: MatpoolRenter
+    session_token: str = ""
+    port: int = 8765
+    create_locks: dict[str, threading.Lock] = {}
+    idempotency: dict[tuple[str, str], tuple[float, dict[str, Any], int]] = {}
+    idempotency_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 基础
     def log_message(self, fmt: str, *args: Any) -> None:
         if os.environ.get("GPUFINDER_VERBOSE"):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _allowed_hosts(self) -> set[str]:
+        return {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+
+    def _guard(self, mutating: bool) -> bool:
+        """校验 Host / Origin / Content-Type / 会话令牌。
+
+        仅监听 127.0.0.1 不等于可信：浏览器里的恶意页面仍可发起
+        跨站 POST。Host 校验防 DNS rebinding，Origin 拒绝跨站页面，
+        令牌拒绝其他本机进程的无凭证调用。
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in self._allowed_hosts():
+            self._send_error_json("非法 Host", status=403)
+            return False
+        if not mutating:
+            return True
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            self._send_error_json("Content-Type 必须是 application/json", status=415)
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            allowed_origins = {f"http://{h}" for h in self._allowed_hosts()}
+            if origin.rstrip("/").lower() not in allowed_origins:
+                self._send_error_json("非法 Origin", status=403)
+                return False
+        return self._token_ok()
+
+    def _token_ok(self) -> bool:
+        token = (self.headers.get("X-GPU-Finder-Token") or "").strip()
+        if not token or not secrets.compare_digest(token, self.session_token):
+            self._send_error_json("缺少或无效的本地会话令牌", status=403)
+            return False
+        return True
 
     def _send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -109,6 +150,8 @@ class APIHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "not found"}, status=404)
             return
         data = target.read_bytes()
+        if rel == "index.html":
+            data = data.replace(b"__GPU_FINDER_TOKEN__", self.session_token.encode("utf-8"))
         ctype = _MIME.get(target.suffix.lower()) or mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -120,11 +163,73 @@ class APIHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _run_create(self, platform: str, body: dict[str, Any], fn: Any,
+                    errors: tuple[type[Exception], ...]) -> None:
+        """创建付费实例的统一互斥 + 幂等边界。
+
+        - 同一平台同一时间只能有一个创建请求（双击/重复 HTTP 直接 409）；
+        - 同一个 request_id 只执行一次，重放返回原结果；
+        - 失败结果也缓存，避免超时后盲目重发导致第二个实例。
+        """
+        request_id = str(body.get("request_id") or "").strip()
+        if not (8 <= len(request_id) <= 128) or not all(c.isalnum() or c in "-_" for c in request_id):
+            self._send_error_json("缺少有效的 request_id（8-128 位字母/数字/-_）", status=400)
+            return
+        key = (platform, request_id)
+        lock = self.create_locks.setdefault(platform, threading.Lock())
+        if not lock.acquire(blocking=False):
+            self._send_error_json("该平台已有创建请求正在处理，请勿重复提交", status=409)
+            return
+        try:
+            with self.idempotency_lock:
+                cached = self.idempotency.get(key)
+            if cached:
+                self._send_json(cached[1], status=cached[2])
+                return
+            renters = {
+                "compshare": self.rent,
+                "autodl": self.autodl_rent,
+                "gpushare": self.gpushare_rent,
+                "matpool": self.matpool_rent,
+            }
+            try:
+                active = int(renters[platform].active_count())
+                limit = int(self.rent.rent.get("max_active_instances") or 2)
+            except Exception as exc:  # noqa: BLE001
+                self._send_error_json(f"无法确认现有实例数量，已拒绝创建：{exc}", status=400)
+                return
+            if active >= limit:
+                self._send_error_json(
+                    f"当前已有 {active} 个实例，达到上限 {limit}；请先释放实例或调整设置", status=409
+                )
+                return
+            try:
+                result = fn()
+                payload = {"ok": True, "instance": result}
+            except errors as exc:
+                payload = {"ok": False, "error": str(exc)}
+            status = 200 if payload.get("ok") else 400
+            with self.idempotency_lock:
+                now = time.time()
+                for old_key, old_value in list(self.idempotency.items()):
+                    if now - old_value[0] >= 900:
+                        self.idempotency.pop(old_key, None)
+                self.idempotency[key] = (now, payload, status)
+            self._send_json(payload, status=status)
+        finally:
+            lock.release()
+
     # ------------------------------------------------------------------ 路由
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if not self._guard(mutating=False):
+            return
+        # 配置、实例 SSH、余额和导出属于敏感 GET，同样要求本地会话令牌。
+        if (path == "/api/config" or path == "/api/export" or path.startswith("/api/rent")):
+            if not self._token_ok():
+                return
 
         if path == "/api/health":
             snap = self.service.get_snapshot()
@@ -321,6 +426,8 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if not self._guard(mutating=True):
+            return
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -338,20 +445,35 @@ class APIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             cfg = self.service.config
-            if "credentials" in body and isinstance(body["credentials"], dict):
-                for key, value in body["credentials"].items():
-                    try:
-                        cfg.set_credential(str(key), str(value or ""))
-                    except KeyError:
-                        self._send_error_json(f"未知凭据: {key}", status=400)
-                        return
-            for key in ("port", "refresh_interval", "open_on_start"):
-                if key in body:
-                    setattr(cfg, key, type(getattr(cfg, key))(body[key]))
-            if isinstance(body.get("overview_families"), list):
-                cfg.overview_families = [str(x) for x in body["overview_families"]][:3]
-            if isinstance(body.get("rent"), dict):
-                self.rent.update_settings(body["rent"])
+            try:
+                if "credentials" in body and isinstance(body["credentials"], dict):
+                    for key, value in body["credentials"].items():
+                        try:
+                            cfg.set_credential(str(key), str(value or ""))
+                        except KeyError:
+                            raise ValueError(f"未知凭据: {key}") from None
+                if "port" in body:
+                    port = int(body["port"])
+                    if not 1 <= port <= 65535:
+                        raise ValueError("port 必须在 1..65535 之间")
+                    cfg.port = port
+                if "refresh_interval" in body:
+                    interval = int(body["refresh_interval"])
+                    if not 0 <= interval <= 86400:
+                        raise ValueError("refresh_interval 必须在 0..86400 秒之间")
+                    cfg.refresh_interval = interval
+                if "open_on_start" in body:
+                    cfg.open_on_start = _json_bool(body["open_on_start"], "open_on_start")
+                if isinstance(body.get("overview_families"), list):
+                    families = [str(x) for x in body["overview_families"] if str(x).strip()]
+                    if len(families) > 3 or any(len(x) > 64 for x in families):
+                        raise ValueError("overview_families 最多 3 个且每项不超过 64 字符")
+                    cfg.overview_families = families
+                if isinstance(body.get("rent"), dict):
+                    self.rent.update_settings(body["rent"])
+            except (TypeError, ValueError) as exc:
+                self._send_error_json(str(exc), status=400)
+                return
             cfg.save()
             self._send_json(
                 {"ok": True, "credentials": cfg.masked_credentials(), "rent": self.rent.rent,
@@ -373,17 +495,19 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/rent/matpool/create":
-            try:
-                record = self.matpool_rent.create(
+            self._run_create(
+                "matpool", body,
+                lambda: self.matpool_rent.create(
                     str(body.get("machine_id") or ""),
                     str(body.get("image_id") or ""),
                     str(body.get("name") or ""),
                     str(body.get("confirm") or ""),
-                )
-            except MatpoolRentError as exc:
-                self._send_error_json(str(exc), status=400)
-                return
-            self._send_json({"ok": True, "instance": record})
+                    gpu_type=str(body.get("gpu_type") or ""),
+                    region=str(body.get("region") or ""),
+                    price=body.get("price"),
+                ),
+                (MatpoolRentError,),
+            )
             return
 
         if path == "/api/rent/matpool/terminate":
@@ -409,17 +533,19 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/rent/gpushare/create":
-            try:
-                record = self.gpushare_rent.create(
+            self._run_create(
+                "gpushare", body,
+                lambda: self.gpushare_rent.create(
                     str(body.get("machine_id") or ""),
                     str(body.get("image_id") or ""),
                     str(body.get("name") or ""),
                     str(body.get("confirm") or ""),
-                )
-            except GpushareRentError as exc:
-                self._send_error_json(str(exc), status=400)
-                return
-            self._send_json({"ok": True, "instance": record})
+                    gpu_type=str(body.get("gpu_type") or ""),
+                    region=str(body.get("region") or ""),
+                    price=body.get("price"),
+                ),
+                (GpushareRentError,),
+            )
             return
 
         if path == "/api/rent/gpushare/terminate":
@@ -445,8 +571,9 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/rent/autodl/create":
-            try:
-                record = self.autodl_rent.create(
+            self._run_create(
+                "autodl", body,
+                lambda: self.autodl_rent.create(
                     str(body.get("machine_id") or ""),
                     str(body.get("image_id") or ""),
                     str(body.get("name") or ""),
@@ -454,11 +581,9 @@ class APIHandler(BaseHTTPRequestHandler):
                     gpu_type=str(body.get("gpu_type") or ""),
                     region=str(body.get("region") or ""),
                     price=body.get("price"),
-                )
-            except AutoDLRentError as exc:
-                self._send_error_json(str(exc), status=400)
-                return
-            self._send_json({"ok": True, "instance": record})
+                ),
+                (AutoDLRentError,),
+            )
             return
 
         if path == "/api/rent/autodl/terminate":
@@ -489,8 +614,9 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/rent/create":
-            try:
-                record = self.rent.create(
+            self._run_create(
+                "compshare", body,
+                lambda: self.rent.create(
                     gpu_type=str(body.get("gpu_type") or ""),
                     region=str(body.get("region") or ""),
                     zone=str(body.get("zone") or ""),
@@ -499,14 +625,9 @@ class APIHandler(BaseHTTPRequestHandler):
                     image_id=str(body.get("image_id") or ""),
                     name=str(body.get("name") or ""),
                     confirm=str(body.get("confirm") or ""),
-                )
-            except RentError as exc:
-                self._send_error_json(str(exc), status=400)
-                return
-            except Exception as exc:  # noqa: BLE001
-                self._send_error_json(f"创建失败：{exc}", status=400)
-                return
-            self._send_json({"ok": True, "instance": record})
+                ),
+                (RentError, ValueError, Exception),
+            )
             return
 
         if path == "/api/rent/refresh":
@@ -560,6 +681,14 @@ class APIHandler(BaseHTTPRequestHandler):
         self._send_error_json("not found", status=404)
 
 
+def _json_bool(value: Any, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ValueError(f"{label} 必须是布尔值")
+
+
 def _to_csv(snap: dict[str, Any]) -> str:
     import csv
     import io
@@ -594,9 +723,23 @@ class Server:
         self.gpushare_rent = GpushareRenter(service.config, http=service.http)
         self.matpool_rent = MatpoolRenter(service.config, http=service.http)
         self.port = port if port is not None else service.config.port
+        self._create_locks = {name: threading.Lock() for name in ("compshare", "autodl", "gpushare", "matpool")}
+        self._idempotency: dict[tuple[str, str], tuple[float, dict[str, Any], int]] = {}
+        self._idempotency_lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._scheduler: threading.Thread | None = None
         self._stop = threading.Event()
+        self.token_path = cache_dir() / "session.token"
+        try:
+            token = self.token_path.read_text("utf-8").strip()
+        except OSError:
+            token = ""
+        self.token = token if len(token) >= 24 else secrets.token_urlsafe(32)
+        try:
+            self.token_path.write_text(self.token + "\n", encoding="utf-8")
+            os.chmod(self.token_path, 0o600)
+        except OSError:
+            pass
 
     @property
     def url(self) -> str:
@@ -607,11 +750,14 @@ class Server:
             "BoundAPIHandler",
             (APIHandler,),
             {"service": self.service, "rent": self.rent, "autodl_rent": self.autodl_rent,
-             "gpushare_rent": self.gpushare_rent, "matpool_rent": self.matpool_rent},
+             "gpushare_rent": self.gpushare_rent, "matpool_rent": self.matpool_rent,
+             "session_token": self.token, "create_locks": self._create_locks,
+             "idempotency": self._idempotency, "idempotency_lock": self._idempotency_lock},
         )
         self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
         self._httpd.daemon_threads = True
         self.port = self._httpd.server_address[1]
+        handler.port = self.port
         threading.Thread(target=self._httpd.serve_forever, name="gpufinder-http", daemon=True).start()
         self._start_scheduler()
 

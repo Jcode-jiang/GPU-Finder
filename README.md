@@ -27,6 +27,8 @@
 - **一键租卡**：优云智算、AutoDL、恒源云、矩池云（实验性），创建后直接拿 SSH / 密码，可一键释放。
 - **零第三方 Python 依赖**：只用标准库；App 用 SwiftUI / AppKit 原生编译。
 - **凭据只存本机**：`~/.config/gpufinder/config.json`，权限 `0600`，仓库中不包含任何密钥。
+- **本地 API 有鉴权**：绑定 `127.0.0.1` 的同时校验 Host / Origin / Content-Type，并要求本地会话令牌；写操作不靠“监听本地”当成免认证。
+- **付费操作有边界**：创建前实时复核机器、价格、库存和上限；同一平台创建互斥，`request_id` 幂等，非只读请求默认不自动重试。
 
 ---
 
@@ -98,8 +100,8 @@
 ## 快速开始
 
 ```bash
-git clone <repo-url>
-cd GPU-Finder-X
+git clone https://github.com/Jcode-jiang/GPU-Finder.git
+cd GPU-Finder
 
 python3 -m gpufinder serve --open     # Dashboard: http://127.0.0.1:8765
 ./macos/build.sh --install            # 构建并安装状态栏 App
@@ -128,7 +130,7 @@ CLI：
 租卡配置是跨平台的：
 
 - **账户余额**：设置里分四行显示优云智算 / AutoDL / 恒源云 / 矩池云余额，来自各平台官方接口；
-- **启用开关 / 价格上限**：所有平台生效；
+- **启用开关 / 价格上限 / 最多同时运行实例**：所有平台生效；
 - **优云智算镜像 / 系统盘 / 自动关机**：只对优云智算生效；
 - **AutoDL 镜像**：可选；留空会按机器 CUDA 上限自动选择；
 - **恒源云**：镜像可选（按机器 CUDA 兼容），自动关机单独设置；系统盘由平台决定；
@@ -163,10 +165,10 @@ CLI：
 | GET | `/api/catalog` | 显卡目录 + 预设 |
 | GET | `/api/presets` | 常用预设 |
 | GET | `/api/providers` | 平台状态 |
-| GET/POST | `/api/config` | 设置与凭据 |
+| GET/POST | `/api/config` | 设置与凭据（POST 需本地会话令牌） |
 | POST | `/api/login/autodl` | 手机号 + 密码换 token |
 | GET | `/api/export?format=csv` | 导出 |
-| GET | `/api/rent/balances` | 四个平台账户余额（并行读取） |
+| GET | `/api/rent/balances` | 四个平台账户余额（需本地会话令牌） |
 | GET | `/api/rent/options` | 优云智算租卡选项 |
 | POST | `/api/rent/quote` | 优云智算报价 |
 | POST | `/api/rent/create` | 优云智算创建 |
@@ -184,7 +186,7 @@ CLI：
 ## 项目结构
 
 ```text
-GPU-Finder-X/
+GPU-Finder/
 ├── gpufinder/
 │   ├── gpu_catalog.py      # 40+ GPU 型号目录（新增型号只改这里）
 │   ├── presets.py          # 常用显卡 / 配置预设

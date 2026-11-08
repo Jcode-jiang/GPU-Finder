@@ -579,6 +579,7 @@ final class AppStore: ObservableObject {
     @Published var rentBusy = false
     @Published var rentConfirm = false
     @Published var rentPlatform = "compshare"
+    @Published var rentRequestId = ""
     @Published var instances: [RentInstance] = []
 
     var activeInstances: [RentInstance] { instances.filter { $0.active } }
@@ -591,6 +592,20 @@ final class AppStore: ObservableObject {
     }()
 
     var baseURLString: String { baseURL?.absoluteString ?? "" }
+
+    private static func readSessionToken() -> String? {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/gpufinder/session.token")
+        guard let token = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func addSessionHeader(_ request: inout URLRequest) {
+        if let token = Self.readSessionToken() {
+            request.setValue(token, forHTTPHeaderField: "X-GPU-Finder-Token")
+        }
+    }
 
     func attach(baseURL: URL) {
         self.baseURL = baseURL
@@ -629,6 +644,7 @@ final class AppStore: ObservableObject {
         do {
             var request = URLRequest(url: baseURL.appendingPathComponent("api/snapshot"))
             request.timeoutInterval = 20
+            addSessionHeader(&request)
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 throw URLError(.badServerResponse)
@@ -697,6 +713,7 @@ final class AppStore: ObservableObject {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.timeoutInterval = timeout
+        addSessionHeader(&request)
         if let body = body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -760,6 +777,7 @@ final class AppStore: ObservableObject {
         }
         rentTarget = offer
         rentPlatform = spec.platform ?? "compshare"
+        rentRequestId = UUID().uuidString
         rentQuote = nil
         rentInstance = nil
         rentError = nil
@@ -836,6 +854,7 @@ final class AppStore: ObservableObject {
                     "gpu_type": gpuType,
                     "region": region,
                     "price": quote.price ?? 0,
+                    "request_id": rentRequestId,
                 ]
                 : [
                     "gpu_type": gpuType,
@@ -845,6 +864,7 @@ final class AppStore: ObservableObject {
                     "mem_gb": spec.memGb ?? 0,
                     "image_id": quote.imageId ?? "",
                     "confirm": "RENT",
+                    "request_id": rentRequestId,
                 ]
             let resp: RentCreateResponse = try await apiRequest(endpoint, method: "POST", body: body, timeout: 180)
             if let instance = resp.instance {

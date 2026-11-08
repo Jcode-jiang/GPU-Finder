@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -63,6 +64,9 @@ class GpushareRenter:
     @property
     def settings(self) -> dict[str, Any]:
         return dict(self.config.rent or {})
+
+    def active_count(self) -> int:
+        return sum(1 for item in self.instances() if not item.get("released"))
 
     def balance(self) -> float:
         data = self._get("/api/account/summary").get("data") or {}
@@ -177,6 +181,8 @@ class GpushareRenter:
             if not payg:
                 continue
             p = float(payg.get("price") or 0)
+            if not math.isfinite(p) or p <= 0:
+                continue
             if price is not None and abs(p - price) > 0.001:
                 continue
             candidates.append((m, p, idle))
@@ -185,6 +191,8 @@ class GpushareRenter:
         candidates.sort(key=lambda x: (x[1], -x[2]))
         machine, p, idle = candidates[0]
         max_price = float(self.settings.get("max_hourly_price") or 5)
+        if not math.isfinite(max_price) or max_price <= 0:
+            raise GpushareRentError("价格上限配置无效")
         if p > max_price:
             raise GpushareRentError(f"价格 ¥{p}/时 超过设置上限 ¥{max_price:.2f}/时")
         toolkit = machine.get("gpuToolkitVersion") or (machine.get("baseInfo") or {}).get("gpuToolkitVersion") or "12.0"
@@ -222,12 +230,56 @@ class GpushareRenter:
             "enabled": bool(self.settings.get("enabled")),
         }
 
+    def _validated_machine(self, machine_id: str, gpu_type: str, region: str,
+                           price: float | None) -> dict[str, Any]:
+        if not machine_id or not gpu_type or not region:
+            raise GpushareRentError("创建参数不完整：缺少 machine_id / gpu_type / region")
+        for machine in self._machines():
+            if str(machine.get("machineId") or "") != str(machine_id):
+                continue
+            base = machine.get("baseInfo") or {}
+            gpu = normalize_gpu(" ".join(str(x) for x in (base.get("gpuName"), machine.get("gpuName")) if x))
+            if not gpu or gpu[0] != gpu_type:
+                raise GpushareRentError("机器型号与报价不一致，请重新报价")
+            if str(machine.get("regionName") or "") != region:
+                raise GpushareRentError("机器所属地区已变化，请重新报价")
+            idle = int(machine.get("gpuNum") or 0) - int(machine.get("gpuUsed") or 0)
+            if idle <= 0 or not machine.get("isOnline") or int(machine.get("status") or 0) != 1:
+                raise GpushareRentError("机器当前无空闲卡，请刷新后重试")
+            payg = next((s for s in (machine.get("skuList") or [])
+                         if s.get("skuName") == "payg" and s.get("enable") == 1), None)
+            if not payg:
+                raise GpushareRentError("机器没有可用的按量计费 SKU，已拒绝创建")
+            current = float(payg.get("price") or 0)
+            if not math.isfinite(current) or current <= 0:
+                raise GpushareRentError("无法获取有效价格，已拒绝创建")
+            if price is not None:
+                try:
+                    expected = float(price)
+                except (TypeError, ValueError) as exc:
+                    raise GpushareRentError("报价参数无效，已拒绝创建") from exc
+                if not math.isfinite(expected) or abs(current - expected) > 0.001:
+                    raise GpushareRentError(
+                        f"报价已从 ¥{expected:.2f}/时 变为 ¥{current:.2f}/时，已拒绝创建"
+                    )
+            limit = float(self.settings.get("max_hourly_price") or 5)
+            if not math.isfinite(limit) or limit <= 0:
+                raise GpushareRentError("价格上限配置无效，已拒绝创建")
+            if current > limit:
+                raise GpushareRentError(f"价格 ¥{current:.2f}/时 超过设置上限 ¥{limit:.2f}/时")
+            return machine
+        raise GpushareRentError("目标机器已下架或不存在，请重新报价")
+
     # ------------------------------------------------------------------ 创建 / 实例
-    def create(self, machine_id: str, image_id: str, name: str = "", confirm: str = "") -> dict[str, Any]:
+    def create(self, machine_id: str, image_id: str, name: str = "", confirm: str = "",
+               gpu_type: str = "", region: str = "", price: float | None = None) -> dict[str, Any]:
         if confirm != "RENT":
             raise GpushareRentError("需要二次确认（confirm=RENT）")
         if not self.settings.get("enabled"):
             raise GpushareRentError("租卡功能未启用，请先在设置中打开并保存")
+        if not image_id:
+            raise GpushareRentError("缺少镜像 ID，已拒绝创建")
+        self._validated_machine(machine_id, gpu_type, region, price)
         data = self._post(
             "/api/instance/create",
             {"models": -1, "machineId": machine_id, "skuName": "payg", "unit": 1,
@@ -296,34 +348,49 @@ class GpushareRenter:
             "ssh": {"command": cmd, "password": password, "ip": host, "user": str(ssh.get("username") or "root")},
         }
 
+    def _find(self, instance_id: str) -> dict[str, Any] | None:
+        """只在实例列表请求成功时返回 None；请求失败会抛异常，不能当作已释放。"""
+        for item in self.instances():
+            if item["uhost_id"] == instance_id:
+                return item
+        return None
+
     def terminate(self, instance_id: str) -> dict[str, Any]:
         try:
-            info = self.instance(instance_id)
-        except GpushareRentError:
-            info = {}
+            info = self._find(instance_id)
+        except GpushareRentError as exc:
+            raise GpushareRentError(f"无法确认实例当前状态，释放未执行：{exc}") from exc
+        if info is None or info.get("released") is True:
+            return self._released(instance_id)
         state = str(info.get("state") or "")
         if state not in ("stop", "stopped", "shutdown"):
             self._put("/api/instance/manage", {"instanceId": instance_id, "skuName": "payg", "actionName": "stop"})
             deadline = time.time() + 180
+            stopped = False
             while time.time() < deadline:
                 time.sleep(4)
                 try:
-                    state = str(self.instance(instance_id).get("state") or "")
+                    current = self._find(instance_id)
                 except GpushareRentError:
-                    state = "gone"
-                if state in ("stop", "stopped", "shutdown", "gone"):
+                    continue
+                if current is None or current.get("released") is True:
+                    return self._released(instance_id)
+                if str(current.get("state") or "") in ("stop", "stopped", "shutdown"):
+                    stopped = True
                     break
-        if state == "gone":
-            return self._released(instance_id)
+            if not stopped:
+                raise GpushareRentError("等待实例关机超时，未执行释放；请到恒源云控制台确认状态")
         self._put("/api/instance/manage", {"instanceId": instance_id, "skuName": "payg", "actionName": "release"})
         deadline = time.time() + 180
         while time.time() < deadline:
             time.sleep(4)
             try:
-                self.instance(instance_id)
+                current = self._find(instance_id)
             except GpushareRentError:
+                continue
+            if current is None or current.get("released") is True or str(current.get("state") or "") in ("released", "deleted"):
                 return self._released(instance_id)
-        return self._released(instance_id)
+        raise GpushareRentError("释放请求已发送，但 180 秒内未确认实例消失；结果未确认，请到恒源云控制台核实")
 
     @staticmethod
     def _released(instance_id: str) -> dict[str, Any]:

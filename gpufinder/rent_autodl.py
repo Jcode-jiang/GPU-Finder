@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -48,6 +49,9 @@ class AutoDLRenter:
             msg = data.get("msg") or data.get("code") or "未知错误"
             raise AutoDLRentError(f"AutoDL：{msg}")
         return data
+
+    def active_count(self) -> int:
+        return sum(1 for item in self.instances() if not item.get("released"))
 
     def balance(self) -> float:
         """AutoDL 余额（元）。wallet.assets 单位是分。"""
@@ -185,6 +189,40 @@ class AutoDLRenter:
             "enabled": bool(settings.get("enabled")),
         }
 
+    def _validated_machine(self, machine_id: str, gpu_type: str, region: str,
+                           price: float | None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """创建前按真实 machine_id 重新拉取可信报价，拒绝机器/型号/价格漂移。"""
+        if not machine_id or not gpu_type or not region:
+            raise AutoDLRentError("创建参数不完整：缺少 machine_id / gpu_type / region")
+        for raw, norm in self._machines(gpu_type):
+            if str(raw.get("machine_id") or "") != str(machine_id):
+                continue
+            if norm["region"] != region:
+                raise AutoDLRentError("机器所属地区已变化，请重新报价")
+            if norm["gpu"] != gpu_type:
+                raise AutoDLRentError("机器型号与报价不一致，请重新报价")
+            if not norm["online"] or norm["idle"] <= 0:
+                raise AutoDLRentError("机器当前无空闲卡，请刷新后重试")
+            current = norm["price"]
+            if current is None or not math.isfinite(float(current)) or float(current) <= 0:
+                raise AutoDLRentError("无法获取有效价格，已拒绝创建")
+            if price is not None:
+                try:
+                    expected = float(price)
+                except (TypeError, ValueError) as exc:
+                    raise AutoDLRentError("报价参数无效，已拒绝创建") from exc
+                if not math.isfinite(expected) or abs(float(current) - expected) > 0.001:
+                    raise AutoDLRentError(
+                        f"报价已从 ¥{expected:.2f}/时 变为 ¥{float(current):.2f}/时，已拒绝创建"
+                    )
+            limit = float(self.rent_settings.get("max_hourly_price") or 5)
+            if not math.isfinite(limit) or limit <= 0:
+                raise AutoDLRentError("价格上限配置无效，已拒绝创建")
+            if float(current) > limit:
+                raise AutoDLRentError(f"价格 ¥{float(current):.2f}/时 超过设置上限 ¥{limit:.2f}/时")
+            return raw, norm
+        raise AutoDLRentError("目标机器已下架或不存在，请重新报价")
+
     # ------------------------------------------------------------------ 创建
     def create(self, machine_id: str, image_id: str, name: str = "", confirm: str = "",
                gpu_type: str = "", region: str = "", price: float | None = None) -> dict[str, Any]:
@@ -193,6 +231,9 @@ class AutoDLRenter:
         settings = self.rent_settings
         if not settings.get("enabled"):
             raise AutoDLRentError("租卡功能未启用，请先在设置中打开并保存")
+        if not image_id:
+            raise AutoDLRentError("缺少镜像 ID，已拒绝创建")
+        self._validated_machine(machine_id, gpu_type, region, price)
         payload = {
             "instance_info": {
                 "machine_id": machine_id,
@@ -217,34 +258,10 @@ class AutoDLRenter:
                 "expand_data_disk": 0,
             },
         }
-        last_error: AutoDLRentError | None = None
-        uuid = ""
-        try:
-            data = self._post("/api/v1/order/instance/create/payg", payload)
-            uuid = str(data.get("data") or "")
-        except AutoDLRentError as exc:
-            last_error = exc
-        if not uuid and gpu_type and region:
-            # 主机可能“已租满/存储已满”，自动换一台同地区同价位的空闲机器重试
-            try:
-                candidates = [(r, n) for r, n in self._machines(gpu_type)
-                              if n["region"] == region and r.get("machine_id") != machine_id
-                              and (price is None or abs((n["price"] or 0) - price) < 0.001)]
-                candidates.sort(key=lambda x: -x[1]["idle"])
-                for raw, _norm in candidates[:5]:
-                    payload["instance_info"]["machine_id"] = raw.get("machine_id")
-                    payload["price_info"]["machine_id"] = raw.get("machine_id")
-                    try:
-                        data = self._post("/api/v1/order/instance/create/payg", payload)
-                        uuid = str(data.get("data") or "")
-                        if uuid:
-                            break
-                    except AutoDLRentError as exc:
-                        last_error = exc
-            except AutoDLRentError:
-                pass
+        data = self._post("/api/v1/order/instance/create/payg", payload)
+        uuid = str(data.get("data") or "")
         if not uuid:
-            raise last_error or AutoDLRentError("创建成功但没有返回实例 ID")
+            raise AutoDLRentError("创建接口未返回实例 ID，结果待确认，请先刷新实例列表")
         warning = ""
         minutes = int(settings.get("auto_stop_minutes") or 0)
         if minutes > 0:
@@ -323,25 +340,54 @@ class AutoDLRenter:
         }
 
     def terminate(self, uuid: str) -> dict[str, Any]:
+        try:
+            current = self.instance(uuid)
+        except AutoDLRentError:
+            try:
+                nodes = self.instances()
+            except AutoDLRentError as exc:
+                raise AutoDLRentError(f"无法确认实例当前状态，释放未执行：{exc}") from exc
+            if not any(n.get("uhost_id") == uuid for n in nodes):
+                return self._released(uuid)
+            raise AutoDLRentError("无法确认实例当前状态，释放未执行")
+        if current.get("released") is True:
+            return current
         self._post("/api/v1/instance/power_off", {"instance_uuid": uuid})
         deadline = time.time() + 180
+        stopped = False
         while time.time() < deadline:
-            try:
-                info = self.instance(uuid)
-            except AutoDLRentError:
-                info = {}
-            state = str(info.get("state") or "")
-            if state in ("shutdown", "stopped", "offline"):
-                break
             time.sleep(3)
+            try:
+                nodes = self.instances()
+            except AutoDLRentError:
+                continue
+            found = next((n for n in nodes if n.get("uhost_id") == uuid), None)
+            if found is None or found.get("released") is True:
+                return self._released(uuid)
+            if str(found.get("state") or "") in ("shutdown", "stopped", "offline"):
+                stopped = True
+                break
+        if not stopped:
+            raise AutoDLRentError("等待实例关机超时，未执行释放；请到 AutoDL 控制台确认状态")
         self._post("/api/v1/instance/release", {"instance_uuid": uuid})
-        try:
-            return self.instance(uuid)
-        except AutoDLRentError:
-            return {
-                "platform": "autodl", "uhost_id": uuid, "state": "released", "released": True,
-                "region": "", "zone": "", "zone_name": "", "gpu_type": "", "gpu": "",
-                "cpu": None, "mem_gb": None, "price": None, "image_name": "", "name": uuid,
-                "ip": "", "ssh_command": "", "password": "", "auto_stop_at": None,
-                "error": "", "warning": "", "ssh": {"command": "", "password": "", "ip": "", "user": "root"},
-            }
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            time.sleep(3)
+            try:
+                nodes = self.instances()
+            except AutoDLRentError:
+                continue
+            found = next((n for n in nodes if n.get("uhost_id") == uuid), None)
+            if found is None or found.get("released") is True:
+                return self._released(uuid)
+        raise AutoDLRentError("释放请求已发送，但未确认实例消失；结果未确认，请到 AutoDL 控制台核实")
+
+    @staticmethod
+    def _released(uuid: str) -> dict[str, Any]:
+        return {
+            "platform": "autodl", "uhost_id": uuid, "state": "released", "released": True,
+            "region": "", "zone": "", "zone_name": "", "gpu_type": "", "gpu": "",
+            "cpu": None, "mem_gb": None, "price": None, "image_name": "", "name": uuid,
+            "ip": "", "ssh_command": "", "password": "", "auto_stop_at": None,
+            "error": "", "warning": "", "ssh": {"command": "", "password": "", "ip": "", "user": "root"},
+        }

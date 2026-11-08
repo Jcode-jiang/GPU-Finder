@@ -21,6 +21,7 @@
     "disk_gb": 100,
     "auto_stop_minutes": 60,
     "max_hourly_price": 5,
+    "max_active_instances": 2,
     "name_prefix": "gpufinder"
   }
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import threading
 import time
@@ -28,6 +29,7 @@ RENT_DEFAULTS: dict[str, Any] = {
     "disk_gb": 100,
     "auto_stop_minutes": 60,
     "max_hourly_price": 5.0,
+    "max_active_instances": 2,
     "name_prefix": "gpufinder",
     "autodl_image_id": "",
     "gpushare_image_id": "",
@@ -36,6 +38,42 @@ RENT_DEFAULTS: dict[str, Any] = {
 }
 
 INSTANCE_FILE = "instances.json"
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    raise ValueError("enabled 必须是布尔值")
+
+
+def _parse_int(value: Any, key: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} 必须是整数")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} 必须是整数") from exc
+    return number
+
+
+def _parse_float(value: Any, key: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} 必须是有限数字")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} 必须是有限数字") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{key} 必须是有限数字")
+    return number
 
 
 class RentError(Exception):
@@ -82,25 +120,70 @@ class RentService:
     @property
     def rent(self) -> dict[str, Any]:
         current = dict(RENT_DEFAULTS)
-        current.update(self.config.rent or {})
+        raw = self.config.rent or {}
+        current.update({k: v for k, v in raw.items() if k in RENT_DEFAULTS})
+        # 即使配置文件被手工改坏，也不允许 NaN/Infinity 或负上限进入比较逻辑。
+        for key in ("max_hourly_price",):
+            try:
+                value = float(current.get(key))
+                if not math.isfinite(value) or not 0.01 <= value <= 1000:
+                    raise ValueError
+                current[key] = value
+            except (TypeError, ValueError):
+                current[key] = RENT_DEFAULTS[key]
+        for key in ("disk_gb", "auto_stop_minutes", "gpushare_auto_stop_minutes", "max_active_instances"):
+            try:
+                value = int(current.get(key))
+                current[key] = value
+            except (TypeError, ValueError):
+                current[key] = RENT_DEFAULTS[key]
+        if not isinstance(current.get("enabled"), bool):
+            try:
+                current["enabled"] = _parse_bool(current.get("enabled"))
+            except ValueError:
+                current["enabled"] = False
         return current
 
     def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(values, dict):
+            raise ValueError("rent 必须是对象")
         merged = self.rent
         for key, value in values.items():
             if key not in RENT_DEFAULTS:
                 continue
-            if key in {"enabled"}:
-                merged[key] = bool(value)
-            elif key in {"disk_gb", "auto_stop_minutes", "gpushare_auto_stop_minutes"}:
-                merged[key] = int(value)
+            if key == "enabled":
+                merged[key] = _parse_bool(value)
+            elif key in {"disk_gb", "auto_stop_minutes", "gpushare_auto_stop_minutes", "max_active_instances"}:
+                number = _parse_int(value, key)
+                if key == "disk_gb" and not 10 <= number <= 2000:
+                    raise ValueError("disk_gb 必须在 10..2000 之间")
+                if key == "max_active_instances" and not 1 <= number <= 10:
+                    raise ValueError("max_active_instances 必须在 1..10 之间")
+                if key not in {"disk_gb", "max_active_instances"} and not 0 <= number <= 10080:
+                    raise ValueError(f"{key} 必须在 0..10080 分钟之间")
+                merged[key] = number
             elif key == "max_hourly_price":
-                merged[key] = float(value)
+                number = _parse_float(value, key)
+                if not 0.01 <= number <= 1000:
+                    raise ValueError("max_hourly_price 必须在 0.01..1000 之间")
+                merged[key] = round(number, 4)
+            elif key == "matpool_image_policy":
+                policy = str(value or "").strip().lower()
+                if policy not in {"auto", "latest"}:
+                    raise ValueError("matpool_image_policy 只能是 auto 或 latest")
+                merged[key] = policy
             else:
-                merged[key] = str(value)
+                text = str(value or "").strip()
+                if len(text) > 200:
+                    raise ValueError(f"{key} 过长")
+                merged[key] = text
         self.config.rent = merged
         self.config.save()
         return merged
+
+    def active_count(self) -> int:
+        with self._lock:
+            return sum(1 for r in self._records if not r.released)
 
     def balance(self) -> float:
         """优云智算可用余额（元）。"""
@@ -205,13 +288,16 @@ class RentService:
             raise RentError("租卡功能未启用，请先在设置中打开并保存")
         api = self._api()
         quote = self.quote(gpu_type, region, zone, cpu, mem_gb)
-        if quote["capacity"] is False:
-            raise RentError("当前规格库存不足，请换区域或刷新后再试")
+        if quote["capacity"] is not True:
+            raise RentError("无法确认当前规格库存，已取消创建，请刷新后重试")
         price = quote["price"]
-        if price is None:
-            raise RentError("无法获取该规格价格，已取消创建")
-        if price > float(settings.get("max_hourly_price") or 5):
-            raise RentError(f"价格 ¥{price:.2f}/时 超过设置上限 ¥{float(settings['max_hourly_price']):.2f}/时")
+        if price is None or not math.isfinite(float(price)) or float(price) <= 0:
+            raise RentError("无法获取有效价格，已取消创建")
+        limit = float(settings.get("max_hourly_price") or 5)
+        if not math.isfinite(limit) or limit <= 0:
+            raise RentError("价格上限配置无效，已取消创建")
+        if float(price) > limit:
+            raise RentError(f"价格 ¥{float(price):.2f}/时 超过设置上限 ¥{limit:.2f}/时")
 
         image = image_id or quote["image_id"]
         disk_gb = int(settings.get("disk_gb") or 100)
@@ -394,14 +480,16 @@ class RentService:
         while True:
             try:
                 infos = self._describe(api, [uhost_id])
+                describe_ok = True
             except (ProviderError, AuthRequired):
                 infos = []
+                describe_ok = False
             info = infos[0] if infos else {}
-            state = str(info.get("State") or record.state)
-            if state == "Stopped" or not wait_stopped:
+            state = str(info.get("State") or "")
+            if describe_ok and (state == "Stopped" or not infos):
                 break
             if time.time() > deadline:
-                raise RentError("等待实例关机超时，请到控制台确认后释放")
+                raise RentError("等待实例关机超时，未执行释放；请到控制台确认状态")
             try:
                 api.call(
                     "StopCompShareInstance",
@@ -416,12 +504,31 @@ class RentService:
                 {"Region": record.region, "Zone": record.zone, "UHostId": uhost_id, "ReleaseUDisk": True},
             )
         except (ProviderError, AuthRequired) as exc:
-            raise RentError(f"释放失败：{exc}") from exc
-        record.released = True
-        record.state = "Terminated"
-        with self._lock:
-            self._save()
-        return self._public(record)
+            raise RentError(f"释放请求失败：{exc}") from exc
+        # 只有官方 Describe 明确看不到实例，或返回 Terminated，才认定释放完成。
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                infos = self._describe(api, [uhost_id])
+            except (ProviderError, AuthRequired):
+                time.sleep(5)
+                continue
+            if not infos:
+                record.released = True
+                record.state = "Terminated"
+                with self._lock:
+                    self._save()
+                return self._public(record)
+            state = str(infos[0].get("State") or "")
+            if state in ("Terminated", "Terminating"):
+                if state == "Terminated":
+                    record.released = True
+                    record.state = "Terminated"
+                    with self._lock:
+                        self._save()
+                    return self._public(record)
+            time.sleep(5)
+        raise RentError("释放请求已发送，但 120 秒内未确认实例终止；结果未确认，请到优云智算控制台核实")
 
     # ------------------------------------------------------------------ 持久化
     def _load(self) -> None:
