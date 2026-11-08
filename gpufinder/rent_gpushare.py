@@ -37,6 +37,8 @@ class GpushareRenter:
             data = resp.json()
         except (HttpError, ValueError) as exc:
             raise GpushareRentError(f"恒源云请求失败：{exc}") from exc
+        if not isinstance(data, dict):
+            raise GpushareRentError("恒源云返回了非对象响应")
         if data.get("status") != 0:
             raise GpushareRentError(f"恒源云：{data.get('msg') or '未知错误'}")
         return data
@@ -47,6 +49,8 @@ class GpushareRenter:
             data = resp.json()
         except (HttpError, ValueError) as exc:
             raise GpushareRentError(f"恒源云请求失败：{exc}") from exc
+        if not isinstance(data, dict):
+            raise GpushareRentError("恒源云返回了非对象响应")
         if data.get("status") != 0:
             raise GpushareRentError(f"恒源云：{data.get('msg') or '未知错误'}")
         return data
@@ -57,6 +61,8 @@ class GpushareRenter:
             data = resp.json()
         except (HttpError, ValueError) as exc:
             raise GpushareRentError(f"恒源云请求失败：{exc}") from exc
+        if not isinstance(data, dict):
+            raise GpushareRentError("恒源云返回了非对象响应")
         if data.get("status") != 0:
             raise GpushareRentError(f"恒源云：{data.get('msg') or '未知错误'}")
         return data
@@ -69,7 +75,9 @@ class GpushareRenter:
         return sum(1 for item in self.instances() if not item.get("released"))
 
     def balance(self) -> float:
-        data = self._get("/api/account/summary").get("data") or {}
+        data = self._get("/api/account/summary").get("data")
+        if not isinstance(data, dict):
+            raise GpushareRentError("恒源云余额响应格式异常")
         return round(float(data.get("totalBalance") or 0), 2)
 
     # ------------------------------------------------------------------ 镜像
@@ -305,8 +313,10 @@ class GpushareRenter:
                   {"instanceId": instance_id, "timeStamp": ts, "enable": True})
 
     def instances(self) -> list[dict[str, Any]]:
-        data = self._get("/api/instance/list", {"pn": 1, "ps": 50}).get("data") or {}
-        return [self._map(r) for r in (data.get("list") or [])]
+        data = self._get("/api/instance/list", {"pn": 1, "ps": 50}).get("data")
+        if not isinstance(data, dict):
+            raise GpushareRentError("恒源云实例响应格式异常")
+        return [self._map(r) for r in (data.get("list") or []) if isinstance(r, dict)]
 
     def instance(self, instance_id: str) -> dict[str, Any]:
         for raw in self.instances():
