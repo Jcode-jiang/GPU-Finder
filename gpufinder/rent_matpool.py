@@ -128,7 +128,7 @@ class MatpoolRenter:
             "zone_name": region,
             "cpu": len(machine.get("cpuIds") or []) or None,
             "mem_gb": round((machine.get("ramMB") or 0) / 1024) or None,
-            "image_id": image_id,
+            "image_id": str(image_id),
             "image_name": image_name,
             "disk_gb": machine.get("diskGB"),
             "price": info["price"],

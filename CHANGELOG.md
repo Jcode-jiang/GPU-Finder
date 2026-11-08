@@ -19,6 +19,7 @@
 - macOS App 默认构建 Universal（arm64 + x86_64），增加 Developer ID/公证脚本、SHA-256 打包与发布检查清单。
 - 增加 Ruff 静态检查、四平台离线价格守卫测试和发布工作流。
 - 完成 AutoDL / 恒源云 SSH 真实冒烟；记录矩池云启动超时与优云智算 SSH 认证阻塞。
+- 修复矩池云 quote `image_id` 与恒源云 `auto_stop_at` 的 Swift 解码类型不一致。
 
 ## [2.0.1] - 2026-11-07
 

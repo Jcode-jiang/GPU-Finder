@@ -324,6 +324,23 @@ class GpushareRenter:
                 return raw
         raise GpushareRentError("实例还没有出现在列表中，请稍后刷新")
 
+    @staticmethod
+    def _timestamp(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        try:
+            return int(float(text))
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime
+            return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return None
+
     def _map(self, raw: dict[str, Any]) -> dict[str, Any]:
         tools = {t.get("key"): t for t in (raw.get("toolsAttrs") or [])}
         ssh = tools.get("ssh") or {}
@@ -352,7 +369,7 @@ class GpushareRenter:
             "ssh_command": cmd,
             "password": password,
             "released": int(raw.get("deleted") or 0) == 1,
-            "auto_stop_at": raw.get("scheduleStopTime"),
+            "auto_stop_at": self._timestamp(raw.get("scheduleStopTime")),
             "error": "",
             "warning": "",
             "ssh": {"command": cmd, "password": password, "ip": host, "user": str(ssh.get("username") or "root")},
